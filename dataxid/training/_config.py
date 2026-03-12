@@ -28,7 +28,6 @@ class ModelConfig:
                 embedding_dim=128,
                 model_size="large",
                 max_epochs=50,
-                encoder_mode="frozen",
             ),
         )
     """
@@ -39,7 +38,6 @@ class ModelConfig:
     max_epochs: int = 100
     early_stop_patience: int = 4
     val_split: float = 0.1
-    encoder_mode: Literal["standard", "frozen"] = "standard"
     privacy_enabled: bool = False
     privacy_noise: float = 0.1
     encoding_types: dict[str, str] | None = None
