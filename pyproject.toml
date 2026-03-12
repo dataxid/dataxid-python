@@ -6,7 +6,7 @@ authors = [{ name = "Dataxid", email = "dev@dataxid.com" }]
 requires-python = ">=3.10"
 readme = "README.md"
 license = "Apache-2.0"
-keywords = ["synthetic-data", "privacy", "machine-learning", "differential-privacy", "split-learning"]
+keywords = ["synthetic-data", "privacy", "machine-learning", "differential-privacy", "privacy-by-architecture"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Typing :: Typed",
@@ -31,7 +31,14 @@ dependencies = [
     "numpy>=2.0.0",
 ]
 
-[project.optional-dependencies]
+[project.urls]
+Homepage = "https://dataxid.com"
+Documentation = "https://docs.dataxid.com"
+Repository = "https://github.com/dataxid/dataxid-python"
+Issues = "https://github.com/dataxid/dataxid-python/issues"
+Changelog = "https://github.com/dataxid/dataxid-python/blob/main/CHANGELOG.md"
+
+[dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-xdist>=3.5",
@@ -39,12 +46,8 @@ dev = [
     "pyright>=1.1.390",
 ]
 
-[project.urls]
-Homepage = "https://dataxid.com"
-Documentation = "https://docs.dataxid.com"
-Repository = "https://github.com/dataxid/dataxid-python"
-Issues = "https://github.com/dataxid/dataxid-python/issues"
-Changelog = "https://github.com/dataxid/dataxid-python/blob/main/CHANGELOG.md"
+[tool.uv]
+default-groups = ["dev"]
 
 [build-system]
 requires = ["hatchling"]
