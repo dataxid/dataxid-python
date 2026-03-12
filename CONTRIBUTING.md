@@ -7,9 +7,7 @@ Thanks for your interest in contributing! Here's how to get started.
 ```bash
 git clone https://github.com/dataxid/dataxid-python.git
 cd dataxid-python
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync
 ```
 
 ## Running Tests
