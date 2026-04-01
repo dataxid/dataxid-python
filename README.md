@@ -94,6 +94,6 @@ model = dataxid.Model.create(
 ## Links
 
 - [Documentation](https://docs.dataxid.com)
-- [API Reference](https://docs.dataxid.com/api)
+- [API Reference](https://docs.dataxid.com/docs/api-reference)
 - [GitHub](https://github.com/dataxid/dataxid-python)
 - [Examples](examples/quickstart.py)
