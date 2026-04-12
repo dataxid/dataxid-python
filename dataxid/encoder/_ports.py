@@ -90,6 +90,8 @@ class EncoderPort(Protocol):
         model_size: str,
         device: torch.device,
         encoding_types: dict[str, str] | None = None,
+        parent: pd.DataFrame | None = None,
+        parent_encoding_types: dict[str, str] | None = None,
     ) -> None:
         """Analyze raw data → populate schema and build encoder network."""
         ...

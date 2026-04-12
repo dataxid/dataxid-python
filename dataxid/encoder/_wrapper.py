@@ -56,27 +56,74 @@ class Encoder:
         self._backend: EncoderPort | None = None
         self._optimizer: torch.optim.Optimizer | None = None
         self._tensors: dict[str, torch.Tensor] | None = None
+        self._ctx_tensors: dict[str, torch.Tensor] | None = None
         self._live_embeddings: dict[int, torch.Tensor] = {}
         self._embed_counter: int = 0
         self.column_stats: dict[str, dict] = {}
+        self.ctx_column_stats: dict[str, dict] = {}
         self.features: list[str] = []
+        self.ctx_features: list[str] = []
+        self.has_context: bool = False
+        self.is_sequential: bool = False
+        self.seq_len_max: int = 1
+        self.seq_len_median: int = 1
+        self._group_by: str | None = None
+        self._parent_key: str | None = None
+        self._seq_data: dict[str, list] | None = None
 
     def analyze(
         self,
         df: pd.DataFrame,
         encoding_types: dict[str, str] | None = None,
+        parent: pd.DataFrame | None = None,
+        parent_encoding_types: dict[str, str] | None = None,
+        group_by: str | None = None,
+        parent_key: str | None = None,
     ) -> dict[str, Any]:
-        """Analyze raw data and return metadata for model creation."""
-        features = list(df.columns)
+        """Analyze raw data (and optional parent table) → return metadata for model creation.
+
+        When parent is provided, parent columns are analyzed and compressed
+        via FeatureCompressor inside the same encoder — producing a combined embedding.
+
+        When group_by is provided and rows are grouped (1:N), sequential mode
+        is detected automatically: seq_len_max/median computed, positional cardinalities added.
+        """
+        from dataxid.encoder._nn import get_positional_cardinalities
+
+        self._group_by = group_by
+
+        exclude_cols: set[str] = set()
+        if group_by:
+            exclude_cols.add(group_by)
+        features = [c for c in df.columns if c not in exclude_cols]
+        self.features = features
+
+        if parent is not None:
+            ctx_exclude: set[str] = set()
+            if parent_key:
+                ctx_exclude.add(parent_key)
+            if group_by and group_by in parent.columns:
+                ctx_exclude.add(group_by)
+            self.ctx_features = [c for c in parent.columns if c not in ctx_exclude]
+            self.has_context = True
+
+        if group_by and group_by in df.columns:
+            seq_lens = df.groupby(group_by).size()
+            self.is_sequential = True
+            self.seq_len_max = int(seq_lens.max())
+            self.seq_len_median = int(seq_lens.median())
 
         self._backend = _create_backend()
+        ctx_for_analyze = parent[self.ctx_features] if parent is not None else None
         self._backend.analyze(
-            df=df,
+            df=df[features],
             features=features,
             embedding_dim=self._embedding_dim,
             model_size=self._model_size,
             device=torch.device(self._device),
             encoding_types=encoding_types,
+            parent=ctx_for_analyze,
+            parent_encoding_types=parent_encoding_types,
         )
 
         self._optimizer = torch.optim.AdamW(
@@ -84,25 +131,71 @@ class Encoder:
             lr=_DEFAULT_LR,
         )
 
-        empirical_probs = self._backend._compute_priors(df)
-
-        self.features = features
         self.column_stats = self._backend._column_stats()
 
+        cardinalities = self._backend._vocab_sizes()
+        empirical_probs = self._backend._compute_priors(df[features])
+        all_empirical_probs = {k: v.tolist() for k, v in empirical_probs.items()}
+        all_value_mappings = self._backend._value_mappings()
+
+        if parent is not None:
+            ctx_probs = self._backend._compute_ctx_priors(ctx_for_analyze)
+            all_empirical_probs.update({k: v.tolist() for k, v in ctx_probs.items()})
+            self.ctx_column_stats = {
+                k: v for k, v in self.column_stats.items()
+                if k in self.ctx_features
+            }
+
+        if self.has_context and self._backend.ctx_schema is not None:
+            ctx_sub_cols = set(self._backend.ctx_schema.cardinalities.keys())
+            cardinalities = {k: v for k, v in cardinalities.items() if k not in ctx_sub_cols}
+            all_empirical_probs = {k: v for k, v in all_empirical_probs.items() if k not in ctx_sub_cols}
+            all_value_mappings = {k: v for k, v in all_value_mappings.items() if k not in ctx_sub_cols}
+
+        if self.is_sequential:
+            pos_cards = get_positional_cardinalities(self.seq_len_max)
+            cardinalities = {**pos_cards, **cardinalities}
+            for sc, card in pos_cards.items():
+                all_empirical_probs[sc] = [1.0 / card] * card
+
         return _sanitize_null_bytes({
-            "cardinalities": self._backend._vocab_sizes(),
+            "cardinalities": cardinalities,
             "features": features,
             "column_stats": self.column_stats,
-            "value_mappings": self._backend._value_mappings(),
-            "empirical_probs": {
-                k: v.tolist() for k, v in empirical_probs.items()
-            },
+            "value_mappings": all_value_mappings,
+            "empirical_probs": all_empirical_probs,
+            "has_context": self.has_context,
+            "is_sequential": self.is_sequential,
+            "seq_len_max": self.seq_len_max,
+            "seq_len_median": self.seq_len_median,
         })
 
-    def prepare(self, df: pd.DataFrame) -> None:
+    def prepare(
+        self,
+        df: pd.DataFrame,
+        parent: pd.DataFrame | None = None,
+        parent_key: str | None = None,
+    ) -> None:
         """Pre-encode data to tensors. Call once, reuse across epochs."""
         self._check_ready()
-        self._tensors = self._backend._prepare_tensors(df)
+        self._parent_key = parent_key
+
+        if self.is_sequential and self._group_by:
+            self._seq_data = self._backend._prepare_sequential_tensors(
+                df,
+                group_by=self._group_by,
+                seq_len_max=self.seq_len_max,
+                parent=parent,
+                parent_key=parent_key,
+            )
+            self._seq_ctx_embeddings = self._precompute_seq_ctx_embeddings(
+                df, parent, parent_key,
+            )
+            return
+
+        self._tensors = self._backend._prepare_tensors(df[self.features])
+        if parent is not None and self.has_context:
+            self._ctx_tensors = self._backend._prepare_ctx_tensors(parent)
 
     def encode_batch(
         self,
@@ -128,7 +221,14 @@ class Encoder:
         else:
             batch = self._tensors
 
-        embedding = self._backend._encode_batch(batch)
+        ctx_batch = None
+        if self._ctx_tensors is not None:
+            if indices is not None:
+                ctx_batch = {k: v[indices] for k, v in self._ctx_tensors.items()}
+            else:
+                ctx_batch = self._ctx_tensors
+
+        embedding = self._backend._encode_batch(batch, ctx=ctx_batch)
 
         if add_noise and self._privacy_enabled:
             embedding = self._add_noise(embedding)
@@ -196,6 +296,10 @@ class Encoder:
     ) -> list[dict[str, Any]]:
         """Encode all data into batches (frozen encoder mode)."""
         self._check_ready()
+
+        if self.is_sequential:
+            return self._encode_batches_sequential(batch_size, val_split)
+
         if self._tensors is None:
             raise RuntimeError("Call prepare(df) before _encode_batches()")
 
@@ -228,21 +332,123 @@ class Encoder:
 
         return batches
 
+    @torch.no_grad()
+    def _precompute_seq_ctx_embeddings(
+        self,
+        df: pd.DataFrame,
+        parent: pd.DataFrame | None,
+        parent_key: str | None,
+    ) -> torch.Tensor:
+        """Pre-compute frozen context embeddings aligned with entity order in _seq_data."""
+        first_key = next(iter(self._seq_data))
+        n_entities = len(self._seq_data[first_key])
+        compressor = self._backend.encoder.ctx_compressor
+        ctx_dim = compressor.dim_output if compressor is not None else 0
+
+        if parent is None or compressor is None or not self.ctx_features:
+            return torch.zeros(n_entities, ctx_dim, device=torch.device(self._device))
+
+        child_keys = list(df.groupby(self._group_by, sort=False).groups.keys())
+        if parent_key:
+            all_parent_keys = list(parent[parent_key].unique())
+            child_set = set(child_keys)
+            missing_keys = [k for k in all_parent_keys if k not in child_set]
+            entity_keys = child_keys + missing_keys
+            ctx_aligned = (
+                parent.set_index(parent_key).loc[entity_keys].reset_index(drop=True)
+            )
+        else:
+            ctx_aligned = parent.head(n_entities).reset_index(drop=True)
+
+        ctx_clean = ctx_aligned[self.ctx_features]
+        return self._backend.encode_context_only(ctx_clean)
+
+    def _encode_batches_sequential(
+        self,
+        batch_size: int = 256,
+        val_split: float = 0.1,
+    ) -> list[dict[str, Any]]:
+        """Encode sequential data into batches. No target encoder — context-only embedding."""
+        if self._seq_data is None:
+            raise RuntimeError("Call prepare(df) before _encode_batches()")
+
+        first_key = next(iter(self._seq_data))
+        n_entities = len(self._seq_data[first_key])
+        val_size = max(1, round(n_entities * val_split))
+        train_size = n_entities - val_size
+
+        all_indices = list(range(n_entities))
+        random.shuffle(all_indices)
+        train_indices = all_indices[:train_size]
+        val_indices = all_indices[train_size:]
+
+        ctx_sub_cols = set(self._backend.ctx_schema.cardinalities.keys()) if self._backend.ctx_schema else set()
+        seq_keys = [k for k in self._seq_data if k not in ctx_sub_cols]
+
+        def _make_batch(indices: list[int]) -> dict[str, Any]:
+            targets: dict[str, list] = {}
+            for k in seq_keys:
+                targets[k] = [self._seq_data[k][i] for i in indices]
+
+            embedding = self._seq_ctx_embeddings[indices]
+            return {
+                "embedding": serialize_embedding(embedding),
+                "targets": targets,
+                "is_sequential": True,
+            }
+
+        batches: list[dict[str, Any]] = []
+        n_train_batches = math.ceil(train_size / batch_size)
+        for i in range(n_train_batches):
+            start = i * batch_size
+            end = min(start + batch_size, train_size)
+            idx = train_indices[start:end]
+            batch = _make_batch(idx)
+            batch["is_validation"] = False
+            batches.append(batch)
+
+        val_batch = _make_batch(val_indices)
+        val_batch["is_validation"] = True
+        batches.append(val_batch)
+
+        return batches
+
     def _generation_embedding(
         self,
         n_samples: int,
         seed_data: pd.DataFrame | None = None,
+        parent: pd.DataFrame | None = None,
     ) -> dict[str, Any]:
-        """Produce embedding for generation. Zero embedding if no seed_data."""
+        """Produce embedding for generation.
+
+        Sequential mode: context-only embedding via FeatureCompressor.
+        Flat mode: full embedding (target + context) or zero embedding.
+        """
         self._check_ready()
 
+        if self.is_sequential:
+            if parent is not None and self.has_context:
+                ctx_features_only = parent[self.ctx_features] if self.ctx_features else parent
+                embedding = self._backend.encode_context_only(ctx_features_only)
+            else:
+                ctx_dim = self._backend.encoder.ctx_compressor.dim_output if (  # type: ignore[union-attr]
+                    self._backend.encoder.ctx_compressor is not None  # type: ignore[union-attr]
+                ) else 0
+                n_entities = n_samples
+                embedding = torch.zeros(
+                    n_entities, ctx_dim, device=torch.device(self._device),
+                )
+            return serialize_embedding(embedding)
+
         if seed_data is not None:
-            embedding = self._backend.encode(seed_data)
+            ctx_clean = parent[self.ctx_features] if (parent is not None and self.ctx_features) else parent
+            embedding = self._backend.encode(seed_data, ctx_df=ctx_clean)
             if self._privacy_enabled:
                 embedding = self._add_noise(embedding)
         else:
+            embed_dim = self._embedding_dim
             embedding = torch.zeros(
-                n_samples, self._embedding_dim, device=torch.device(self._device),
+                n_samples, embed_dim, device=torch.device(self._device),
             )
 
         return serialize_embedding(embedding)

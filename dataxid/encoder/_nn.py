@@ -22,10 +22,32 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 POSITIONAL_COLUMN = "__pos__"
+SIDX_PREFIX = f"{POSITIONAL_COLUMN}{WIRE_SUB_COLUMN_SEP}sidx_"
 RIDX_PREFIX = f"{POSITIONAL_COLUMN}{WIRE_SUB_COLUMN_SEP}ridx_"
 SLEN_PREFIX = f"{POSITIONAL_COLUMN}{WIRE_SUB_COLUMN_SEP}slen_"
 
+_DIGIT_ENCODING_THRESHOLD = 100
+
 ModelCapacityOrUnits = ModelCapacity | dict[str, list[int]]
+
+
+def get_positional_cardinalities(seq_len_max: int) -> dict[str, int]:
+    """Positional sub-column cardinalities for sequential mode (SIDX, SLEN, RIDX)."""
+    if seq_len_max < _DIGIT_ENCODING_THRESHOLD:
+        return {
+            f"{SIDX_PREFIX}cat": seq_len_max + 1,
+            f"{SLEN_PREFIX}cat": seq_len_max + 1,
+            f"{RIDX_PREFIX}cat": seq_len_max + 1,
+        }
+    digits = [int(d) for d in str(seq_len_max)]
+    cards: dict[str, int] = {}
+    for i, digit in enumerate(digits):
+        e_idx = len(digits) - 1 - i
+        card = (digit + 1) if i == 0 else 10
+        cards[f"{SIDX_PREFIX}E{e_idx}"] = card
+        cards[f"{RIDX_PREFIX}E{e_idx}"] = card
+        cards[f"{SLEN_PREFIX}E{e_idx}"] = card
+    return cards
 
 _DROPOUT_RATE = 0.25
 
