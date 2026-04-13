@@ -19,6 +19,7 @@ import dataxid
 import pandas as pd
 
 dataxid.api_key = "dx_..."
+dataxid.enable_logging("info")  # optional: see training progress
 
 df = pd.read_csv("customers.csv")
 synthetic = dataxid.synthesize(data=df, n_samples=1000)
@@ -91,6 +92,20 @@ model = dataxid.Model.create(
 )
 synthetic = model.generate(parent=synthetic_accounts_df)
 model.delete()
+```
+
+## Logging
+
+```python
+dataxid.enable_logging("info")   # see training progress, epoch stats
+dataxid.enable_logging("debug")  # verbose: includes HTTP requests
+dataxid.disable_logging()        # turn off (default state)
+```
+
+Or via environment variable (no code change needed):
+
+```bash
+DATAXID_LOG=info python my_script.py
 ```
 
 ## Error Handling
