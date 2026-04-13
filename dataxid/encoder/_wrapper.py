@@ -67,7 +67,7 @@ class Encoder:
         self.is_sequential: bool = False
         self.seq_len_max: int = 1
         self.seq_len_median: int = 1
-        self._group_by: str | None = None
+        self._foreign_key: str | None = None
         self._parent_key: str | None = None
         self._seq_data: dict[str, list] | None = None
 
@@ -77,7 +77,7 @@ class Encoder:
         encoding_types: dict[str, str] | None = None,
         parent: pd.DataFrame | None = None,
         parent_encoding_types: dict[str, str] | None = None,
-        group_by: str | None = None,
+        foreign_key: str | None = None,
         parent_key: str | None = None,
     ) -> dict[str, Any]:
         """Analyze raw data (and optional parent table) → return metadata for model creation.
@@ -85,16 +85,16 @@ class Encoder:
         When parent is provided, parent columns are analyzed and compressed
         via FeatureCompressor inside the same encoder — producing a combined embedding.
 
-        When group_by is provided and rows are grouped (1:N), sequential mode
+        When foreign_key is provided and rows are grouped (1:N), sequential mode
         is detected automatically: seq_len_max/median computed, positional cardinalities added.
         """
         from dataxid.encoder._nn import get_positional_cardinalities
 
-        self._group_by = group_by
+        self._foreign_key = foreign_key
 
         exclude_cols: set[str] = set()
-        if group_by:
-            exclude_cols.add(group_by)
+        if foreign_key:
+            exclude_cols.add(foreign_key)
         features = [c for c in df.columns if c not in exclude_cols]
         self.features = features
 
@@ -102,13 +102,13 @@ class Encoder:
             ctx_exclude: set[str] = set()
             if parent_key:
                 ctx_exclude.add(parent_key)
-            if group_by and group_by in parent.columns:
-                ctx_exclude.add(group_by)
+            if foreign_key and foreign_key in parent.columns:
+                ctx_exclude.add(foreign_key)
             self.ctx_features = [c for c in parent.columns if c not in ctx_exclude]
             self.has_context = True
 
-        if group_by and group_by in df.columns:
-            seq_lens = df.groupby(group_by).size()
+        if foreign_key and foreign_key in df.columns:
+            seq_lens = df.groupby(foreign_key).size()
             self.is_sequential = True
             self.seq_len_max = int(seq_lens.max())
             self.seq_len_median = int(seq_lens.median())
@@ -180,10 +180,10 @@ class Encoder:
         self._check_ready()
         self._parent_key = parent_key
 
-        if self.is_sequential and self._group_by:
+        if self.is_sequential and self._foreign_key:
             self._seq_data = self._backend._prepare_sequential_tensors(
                 df,
-                group_by=self._group_by,
+                group_by=self._foreign_key,
                 seq_len_max=self.seq_len_max,
                 parent=parent,
                 parent_key=parent_key,
@@ -348,7 +348,7 @@ class Encoder:
         if parent is None or compressor is None or not self.ctx_features:
             return torch.zeros(n_entities, ctx_dim, device=torch.device(self._device))
 
-        child_keys = list(df.groupby(self._group_by, sort=False).groups.keys())
+        child_keys = list(df.groupby(self._foreign_key, sort=False).groups.keys())
         if parent_key:
             all_parent_keys = list(parent[parent_key].unique())
             child_set = set(child_keys)

@@ -28,11 +28,25 @@ logger = logging.getLogger(__name__)
 # Input validation
 # ---------------------------------------------------------------------------
 
+def _infer_parent_key(
+    foreign_key: str,
+    parent: pd.DataFrame,
+) -> str:
+    """Infer parent_key from foreign_key if the column exists in parent."""
+    if foreign_key in parent.columns:
+        return foreign_key
+    raise InvalidRequestError(
+        f"parent_key not provided and column '{foreign_key}' not found in parent. "
+        f"Specify parent_key explicitly when FK and PK column names differ.",
+        param="parent_key",
+    )
+
+
 def _validate_context_params(
     data: pd.DataFrame,
     parent: pd.DataFrame | None,
     parent_encoding_types: dict[str, str] | None,
-    group_by: str | None,
+    foreign_key: str | None,
     parent_key: str | None,
 ) -> None:
     if parent_encoding_types is not None and parent is None:
@@ -47,10 +61,10 @@ def _validate_context_params(
             param="parent_key",
         )
 
-    if group_by is not None and group_by not in data.columns:
+    if foreign_key is not None and foreign_key not in data.columns:
         raise InvalidRequestError(
-            f"Column '{group_by}' not found in data.",
-            param="group_by",
+            f"Column '{foreign_key}' not found in data.",
+            param="foreign_key",
         )
 
     if (
@@ -63,12 +77,12 @@ def _validate_context_params(
             param="parent_key",
         )
 
-    if parent is not None and group_by is None:
+    if parent is not None and foreign_key is None:
         if len(parent) != len(data):
             raise InvalidRequestError(
                 f"Row count mismatch: parent has {len(parent)} rows, "
                 f"data has {len(data)}. In flat context mode rows must be "
-                f"aligned 1:1. For 1:N joins use group_by.",
+                f"aligned 1:1. For 1:N joins use foreign_key.",
                 param="parent",
             )
 
@@ -109,7 +123,7 @@ class Model:
         base_url: str | None = None,
         parent: pd.DataFrame | None = None,
         parent_encoding_types: dict[str, str] | None = None,
-        group_by: str | None = None,
+        foreign_key: str | None = None,
         parent_key: str | None = None,
     ) -> Model:
         """
@@ -123,15 +137,19 @@ class Model:
             base_url: Override dataxid.base_url
             parent: Parent table for context-aware generation
             parent_encoding_types: Encoding overrides for parent columns
-            group_by: Column in data linking rows to parent entities (enables sequential mode)
-            parent_key: Primary key column in parent table
+            foreign_key: FK column in data linking rows to parent (enables sequential mode)
+            parent_key: PK column in parent table (inferred from foreign_key if same name)
 
         Returns:
             Trained Model ready for generate()
         """
         config = _resolve_config(config)
+
+        if parent is not None and foreign_key is not None and parent_key is None:
+            parent_key = _infer_parent_key(foreign_key, parent)
+
         _validate_context_params(
-            data, parent, parent_encoding_types, group_by, parent_key,
+            data, parent, parent_encoding_types, foreign_key, parent_key,
         )
         http = DataxidClient(api_key=api_key, base_url=base_url)
 
@@ -158,14 +176,14 @@ class Model:
             encoding_types=encoding_types,
             parent=parent,
             parent_encoding_types=parent_encoding_types,
-            group_by=group_by,
+            foreign_key=foreign_key,
             parent_key=parent_key,
         )
 
         if encoder.is_sequential and parent is None:
             raise InvalidRequestError(
                 "Sequential mode requires parent. Groups in "
-                "group_by have multiple rows, which triggers "
+                "foreign_key have multiple rows, which triggers "
                 "entity-level training.",
                 param="parent",
             )
@@ -257,12 +275,12 @@ class Model:
         features = self._encoder.features
         df = decode_columns(raw_codes, features, column_stats)
 
-        group_by = self._encoder._group_by
-        if group_by and ctx is not None and self._encoder._parent_key:
+        fk_col = self._encoder._foreign_key
+        if fk_col and ctx is not None and self._encoder._parent_key:
             pk_col = self._encoder._parent_key
             if pk_col in ctx.columns:
                 key_values = ctx[pk_col].values
-                df.insert(0, group_by, [
+                df.insert(0, fk_col, [
                     key_values[i] if i < len(key_values) else i
                     for i in range(len(df))
                 ])
@@ -343,19 +361,19 @@ class Model:
         features = self._encoder.features
         df = decode_columns(df_flat.to_dict(orient="list"), features, column_stats)
 
-        group_by = self._encoder._group_by
-        if group_by:
+        fk_col = self._encoder._foreign_key
+        if fk_col:
             if (parent is not None
                     and self._encoder._parent_key
                     and self._encoder._parent_key in parent.columns):
                 key_values = parent[self._encoder._parent_key].values
-                df[group_by] = [
+                df[fk_col] = [
                     key_values[idx] if idx < len(key_values) else idx
                     for idx in entity_indices
                 ]
             else:
-                df[group_by] = entity_indices
-            cols = [group_by] + [c for c in df.columns if c != group_by]
+                df[fk_col] = entity_indices
+            cols = [fk_col] + [c for c in df.columns if c != fk_col]
             df = df[cols]
 
         self.status = "ready"

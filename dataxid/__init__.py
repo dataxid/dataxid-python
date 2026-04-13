@@ -58,7 +58,7 @@ def synthesize(
     base_url: str | None = None,
     parent: pd.DataFrame | None = None,
     parent_encoding_types: dict[str, str] | None = None,
-    group_by: str | None = None,
+    foreign_key: str | None = None,
     parent_key: str | None = None,
 ) -> pd.DataFrame:
     """
@@ -79,10 +79,10 @@ def synthesize(
         config: Training config (model_size, embedding_dim, max_epochs, etc.)
         api_key: Override dataxid.api_key
         base_url: Override dataxid.base_url
-        parent: Parent table for context-aware generation (1:1 aligned or joined via group_by)
+        parent: Parent table for context-aware generation (1:1 aligned or joined via foreign_key)
         parent_encoding_types: Encoding overrides for parent columns
-        group_by: Column in data linking rows to parent entities (enables sequential mode)
-        parent_key: Primary key column in parent table
+        foreign_key: FK column in data linking rows to parent (enables sequential mode)
+        parent_key: PK column in parent table (inferred from foreign_key if same name)
 
     Returns:
         DataFrame with synthetic data (target columns only)
@@ -95,7 +95,7 @@ def synthesize(
         base_url=base_url,
         parent=parent,
         parent_encoding_types=parent_encoding_types,
-        group_by=group_by,
+        foreign_key=foreign_key,
         parent_key=parent_key,
     )
     try:
@@ -126,11 +126,13 @@ def synthesize_tables(
 
         from dataxid import Table
 
+        accounts = Table(accounts_df, primary_key="account_id")
+        transactions = Table(transactions_df,
+                             foreign_keys={"account_id": accounts})
+
         syn = dataxid.synthesize_tables({
-            "accounts": Table(accounts_df, primary_key="account_id"),
-            "transactions": Table(
-                transactions_df, references={"account_id": "accounts"}
-            ),
+            "accounts": accounts,
+            "transactions": transactions,
         })
         syn["accounts"]       # synthetic accounts with auto-assigned PK
         syn["transactions"]   # synthetic transactions with valid FK references
@@ -147,6 +149,7 @@ def synthesize_tables(
     from dataxid._table import (
         _assign_primary_keys,
         _remap_foreign_keys,
+        _resolve_fk_targets,
         _topological_sort,
         _validate_tables,
     )
@@ -154,21 +157,22 @@ def synthesize_tables(
     _validate_tables(tables)
     order = _topological_sort(tables)
     assert order is not None  # _validate_tables guarantees no cycles
+    fk_targets = _resolve_fk_targets(tables)
 
     results: dict[str, pd.DataFrame] = {}
 
     for name in order:
         tbl = tables[name]
         pk_col = tbl.primary_key
-        parent_refs = tbl.references
+        resolved_fks = fk_targets[name]
 
         training_data = tbl.data
         if pk_col is not None:
             training_data = training_data.drop(columns=[pk_col])
 
-        ctx_fk = tbl.context_key
+        ctx_fk = _pick_context_fk(tbl)
         if ctx_fk:
-            parent_name = parent_refs[ctx_fk]
+            parent_name = resolved_fks[ctx_fk]
             parent_tbl = tables[parent_name]
             parent_syn = results[parent_name]
 
@@ -180,7 +184,7 @@ def synthesize_tables(
                 base_url=base_url,
                 parent=real_parent,
                 parent_key=parent_tbl.primary_key,
-                group_by=ctx_fk,
+                foreign_key=ctx_fk,
             )
             try:
                 syn_df = model.generate(parent=parent_syn)
@@ -201,7 +205,7 @@ def synthesize_tables(
                 base_url=base_url,
             )
 
-        for fk_c, par_name in parent_refs.items():
+        for fk_c, par_name in resolved_fks.items():
             if fk_c == ctx_fk:
                 continue
             par_syn = results[par_name]
@@ -215,6 +219,21 @@ def synthesize_tables(
         results[name] = syn_df
 
     return results
+
+
+def _pick_context_fk(tbl: Table) -> str | None:
+    """Determine which FK column to use as sequential context.
+
+    Returns None if the table has no foreign_keys or sequential=False.
+    For single FK → that FK. For multiple FKs → sequence_by (validated by Table).
+    """
+    if not tbl.foreign_keys or not tbl.sequential:
+        return None
+    if tbl.sequence_by:
+        return tbl.sequence_by
+    if len(tbl.foreign_keys) == 1:
+        return next(iter(tbl.foreign_keys))
+    return None
 
 
 __all__ = [
