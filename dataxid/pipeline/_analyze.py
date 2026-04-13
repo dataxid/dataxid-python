@@ -439,6 +439,24 @@ _LATLONG_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+_DATETIME_NAME_PATTERNS = re.compile(
+    r"(date|time|timestamp|datetime|created|updated|_at$|_dt$|_ts$)",
+    re.IGNORECASE,
+)
+
+_DATETIME_PARSE_THRESHOLD = 0.8
+
+
+def _looks_like_datetime(series: pd.Series, column_name: str) -> bool:
+    """Heuristic: does a string column likely contain datetime values?"""
+    if _DATETIME_NAME_PATTERNS.search(column_name):
+        sample = series.dropna().head(200)
+        if len(sample) == 0:
+            return False
+        parsed = pd.to_datetime(sample, errors="coerce", format="mixed")
+        return parsed.notna().mean() >= _DATETIME_PARSE_THRESHOLD
+    return False
+
 
 def detect_encoding(series: pd.Series, column_name: str = "") -> EncodingType:
     """Infer the best encoding type from data characteristics and column semantics."""
@@ -460,6 +478,8 @@ def detect_encoding(series: pd.Series, column_name: str = "") -> EncodingType:
             return EncodingType.numeric_binned
 
     if series.dtype == object:
+        if _looks_like_datetime(series, column_name):
+            return EncodingType.datetime
         sample = series.dropna().head(100)
         if len(sample) > 0:
             avg_len = sample.astype(str).str.len().mean()
