@@ -12,7 +12,6 @@ Usage:
     python examples/multitable.py
 """
 
-import logging
 import os
 
 import pandas as pd
@@ -20,7 +19,7 @@ import pandas as pd
 import dataxid
 from dataxid import Table
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+dataxid.enable_logging("info")
 
 dataxid.api_key = os.environ.get("DATAXID_API_KEY", "")
 
@@ -34,17 +33,17 @@ def main() -> None:
         return
 
     df_accounts = pd.DataFrame({
-        "account_id": range(1, 51),
-        "district": [f"district_{i % 5}" for i in range(50)],
-        "frequency": ["monthly", "weekly", "daily"] * 16 + ["monthly", "weekly"],
-        "open_date": pd.date_range("2020-01-01", periods=50, freq="ME"),
+        "account_id": range(1, 101),
+        "district": [f"district_{i % 5}" for i in range(100)],
+        "frequency": ["monthly", "weekly", "daily"] * 33 + ["monthly"],
+        "open_date": pd.date_range("2020-01-01", periods=100, freq="10D"),
     })
 
     df_transactions = pd.DataFrame({
-        "account_id": [i for i in range(1, 51) for _ in range(5)],
-        "date": pd.date_range("2023-01-01", periods=250, freq="D"),
-        "amount": [round(50 + i * 3.7, 2) for i in range(250)],
-        "type": ["credit", "debit"] * 125,
+        "account_id": [i for i in range(1, 101) for _ in range(5)],
+        "date": pd.date_range("2023-01-01", periods=500, freq="D"),
+        "amount": [round(50 + i * 2.5, 2) for i in range(500)],
+        "type": ["credit", "debit"] * 250,
     })
 
     print(f"Accounts:     {len(df_accounts)} rows")

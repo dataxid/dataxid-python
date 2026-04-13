@@ -21,12 +21,14 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
-import logging as _logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import pandas as pd
 
+from dataxid._log import disable_logging, enable_logging
+from dataxid._log import logger as _logger
+from dataxid._log import setup_logging as _setup_logging
 from dataxid._table import Table
 from dataxid.exceptions import (
     APIError,
@@ -44,10 +46,11 @@ from dataxid.exceptions import (
 from dataxid.training._config import ModelConfig
 from dataxid.training._model import Model
 
-_logger = _logging.getLogger("dataxid")
-
 api_key: str | None = None
 base_url: str = "https://api.dataxid.com"
+
+
+_setup_logging()
 
 
 def synthesize(
@@ -237,6 +240,8 @@ def _pick_context_fk(tbl: Table) -> str | None:
 
 
 __all__ = [
+    "enable_logging",
+    "disable_logging",
     "api_key",
     "base_url",
     "synthesize",

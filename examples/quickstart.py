@@ -14,7 +14,6 @@ Usage:
     python examples/quickstart.py
 """
 
-import logging
 import os
 
 import pandas as pd
@@ -22,7 +21,7 @@ from sklearn.datasets import fetch_openml
 
 import dataxid
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+dataxid.enable_logging("info")
 
 dataxid.api_key = os.environ.get("DATAXID_API_KEY", "")
 
