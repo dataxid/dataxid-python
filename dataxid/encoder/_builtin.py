@@ -48,9 +48,10 @@ class BuiltinEncoder:
         encoding_types: dict[str, str] | None = None,
         parent: pd.DataFrame | None = None,
         parent_encoding_types: dict[str, str] | None = None,
+        protect_rare: bool = True,
     ) -> None:
         column_stats = compute_stats(
-            df, features, value_protection=True,
+            df, features, protect_rare=protect_rare,
             encoding_types=encoding_types,
         )
         cardinalities, encoding_map, value_mappings = unpack_stats(
@@ -69,7 +70,7 @@ class BuiltinEncoder:
         if parent is not None:
             ctx_features = list(parent.columns)
             ctx_stats = compute_stats(
-                parent, ctx_features, value_protection=True,
+                parent, ctx_features, protect_rare=protect_rare,
                 encoding_types=parent_encoding_types,
             )
             ctx_cards, ctx_enc_map, ctx_val_mappings = unpack_stats(ctx_stats)
@@ -185,9 +186,12 @@ class BuiltinEncoder:
         """Encode sequential data → dict of list-columns (entity × timesteps).
 
         Parent entities with zero child rows are included as 0-length sequences
-        (single padding row with SLEN=0) so the model learns the "no children" pattern.
+        (single padding row with SLEN=0) so the model learns the "no children"
+        pattern.
 
-        Returns nested lists (not tensors) for SequentialSplitDataLoader compatibility.
+        Returns nested lists (one list per entity, containing its timesteps)
+        rather than dense tensors, so downstream batching can handle variable
+        sequence lengths without padding every row to the maximum.
         """
         self._check_fitted()
         key = group_by
