@@ -21,7 +21,7 @@ import pandas as pd
 dataxid.api_key = "dx_..."
 dataxid.enable_logging("info")  # optional: see training progress
 
-df = pd.read_csv("customers.csv")
+df = pd.read_csv("data.csv")
 synthetic = dataxid.synthesize(data=df, n_samples=1000)
 ```
 
@@ -47,9 +47,45 @@ synthetic["accounts"]       # synthetic accounts with auto-assigned PKs
 synthetic["transactions"]   # sequential transactions per account, valid FKs
 ```
 
+Per-table generation controls are passed as dicts keyed by table name:
+
+```python
+from dataxid import Synthetic, Distribution
+
+accounts_preset = Synthetic(n=1000)
+transactions_preset = Synthetic(n=5000, seed=42)
+
+country_distribution = Distribution(
+    column="country",
+    probabilities={"US": 0.6, "UK": 0.4},
+)
+
+synthetic = dataxid.synthesize_tables(
+    tables={"accounts": accounts, "transactions": transactions},
+    synthetic={
+        "accounts": accounts_preset,
+        "transactions": transactions_preset,
+    },
+    distribution={"accounts": country_distribution},
+)
+```
+
+## Iterative workflow
+
+When you want to train once and generate many times — for example,
+running several sampling strategies against the same model — split the
+call into `Model.create` and `model.generate`:
+
+```python
+model = dataxid.Model.create(data=df)
+synthetic_a = model.generate(n_samples=1000, diversity=0.8)
+synthetic_b = model.generate(n_samples=1000, diversity=1.2)
+model.delete()
+```
+
 ## How It Works
 
-Dataxid is built on a **privacy-by-architecture** principle. Data encoding and decoding happen entirely on your machine; only abstract embeddings are shared with the API for model training. Raw data never leaves your environment.
+DataXID is built on a **privacy-by-architecture** principle. Data encoding and decoding happen entirely on your machine; only abstract embeddings are shared with the API for model training. Raw data never leaves your environment.
 
 ## Configuration
 
@@ -59,39 +95,96 @@ Dataxid is built on a **privacy-by-architecture** principle. Data encoding and d
 | `model_size` | `"medium"` | Model capacity: `"small"`, `"medium"`, `"large"` |
 | `max_epochs` | `100` | Maximum training epochs |
 | `batch_size` | `256` | Training batch size |
-| `privacy_enabled` | `False` | Add noise to embeddings for privacy |
-| `privacy_noise` | `0.1` | Noise scale (Gaussian std) |
+| `privacy` | `Privacy()` | Privacy config (see below) |
 
 ```python
-import dataxid
-import pandas as pd
-
-dataxid.api_key = "dx_..."
-
-df = pd.read_csv("customers.csv")
-
-model = dataxid.Model.create(
-    data=df,
-    config=dataxid.ModelConfig(
-        embedding_dim=128,
-        model_size="large",
-        max_epochs=50,
-    ),
+config = dataxid.ModelConfig(
+    embedding_dim=128,
+    model_size="large",
+    max_epochs=50,
+    privacy=dataxid.Privacy(enabled=True, noise=0.2),
 )
-synthetic = model.generate(n_samples=1000)
-model.delete()
+model = dataxid.Model.create(data=df, config=config)
 ```
 
-`synthesize_tables` handles orchestration automatically. Use `Model.create` for fine-grained control:
+A plain dict is also accepted for quick experiments: `config={"embedding_dim": 128}`.
+
+### Privacy
+
+Privacy settings are grouped under a dedicated `Privacy` config:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enabled` | `False` | Add Gaussian noise to embeddings before they leave the machine |
+| `noise` | `0.1` | Noise scale (Gaussian std) when `enabled=True` |
+| `protect_rare` | `True` | Hide rare categorical values behind a `<protected>` token |
+| `rare_strategy` | `"mask"` | How protected values appear: `"mask"` or `"sample"` |
+
+## Advanced Generation
+
+### Rebalance category distributions
+
+Override the natural distribution of a categorical column:
 
 ```python
-model = dataxid.Model.create(
-    data=transactions_df,
-    parent=accounts_df,
-    foreign_key="account_id",
+model = dataxid.Model.create(data=df)
+
+distribution = dataxid.Distribution(
+    column="gender",
+    probabilities={"M": 0.5, "F": 0.5},
 )
-synthetic = model.generate(parent=synthetic_accounts_df)
-model.delete()
+synthetic = model.generate(n_samples=1000, distribution=distribution)
+```
+
+### Bias correction
+
+Reduce statistical parity gaps across sensitive attributes:
+
+```python
+bias = dataxid.Bias(
+    target="income",
+    sensitive=["gender", "race"],
+)
+synthetic = model.generate(n_samples=1000, bias=bias)
+```
+
+### Conditional generation
+
+Fix known values and let the model complete the rest:
+
+```python
+conditions = pd.DataFrame({"income": [">50K"] * 1000})
+
+synthetic = model.generate(conditions=conditions)
+```
+
+### Impute missing values
+
+Fill `NaN` cells with model predictions; non-NULL cells are preserved:
+
+```python
+model = dataxid.Model.create(data=df)
+filled = model.impute(df, trials=3, pick="mode")
+```
+
+### Tuning presets
+
+Bundle generation-time knobs into a reusable preset:
+
+```python
+preset = dataxid.Synthetic(
+    n=1000,
+    seed=42,
+    diversity=0.8,
+    rare_cutoff=0.95,
+)
+synthetic = model.generate(synthetic=preset)
+```
+
+Direct keyword arguments override preset values:
+
+```python
+synthetic = model.generate(synthetic=preset, diversity=1.2)  # diversity=1.2 wins
 ```
 
 ## Logging
@@ -130,3 +223,4 @@ except dataxid.DataxidError as e:
 - [Documentation](https://docs.dataxid.com)
 - [API Reference](https://docs.dataxid.com/docs/api-reference)
 - [GitHub](https://github.com/dataxid/dataxid-python)
+- [Examples](examples/quickstart.py)
