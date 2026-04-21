@@ -1,10 +1,8 @@
 # Copyright (c) 2026 DataXID Teknoloji ve Ticaret A.Ş.
 # SPDX-License-Identifier: Apache-2.0
 """
-Type conversions and data splitting utilities.
-
-Shared by both the analysis (_analyze.py) and encoding (_encode.py) pipelines.
-Extracted to avoid _encode.py importing internal helpers from _analyze.py.
+Type conversions, token constants, and data splitting utilities shared by
+the analysis and encoding pipelines.
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ import pandas as pd
 # Token constants — shared across analyze + encode
 # ---------------------------------------------------------------------------
 
-RARE_TOKEN = "_RARE_"
+RARE_TOKEN = "<protected>"
 NULL_TOKEN = "<<NULL>>"
 ESCAPE_CHAR = "\x01"
 

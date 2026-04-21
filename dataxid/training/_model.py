@@ -3,25 +3,184 @@
 """
 Model class — training and generation API.
 
-Raw data never leaves the SDK. Only embeddings cross the wire.
+Raw data never leaves the user's machine; only abstract embeddings are
+shared with the API.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import Callable
+from dataclasses import asdict
+from typing import Any, Literal, get_args
 
+import numpy as np
 import pandas as pd
 import torch
 
 from dataxid.client._http import DataxidClient
 from dataxid.encoder._wrapper import Encoder
 from dataxid.exceptions import InvalidRequestError
-from dataxid.pipeline._decode import compute_fixed_probs, decode_columns
-from dataxid.training._config import ModelConfig, _resolve_config
+from dataxid.pipeline._decode import (
+    bias_column_order,
+    compute_distribution_probs,
+    compute_fixed_probs,
+    compute_imputation_probs,
+    conditional_column_order,
+    decode_columns,
+    distribution_column_order,
+    imputation_column_order,
+    merge_fixed_probs,
+    resolve_bias_payload,
+)
+from dataxid.pipeline._encode import (
+    encode_conditions_fixed_values,
+    encode_sequential_conditions_fixed_values,
+)
+from dataxid.training._config import (
+    Bias,
+    Distribution,
+    ModelConfig,
+    RareStrategy,
+    Synthetic,
+    _resolve_config,
+)
 from dataxid.training._frozen import train_frozen
+from dataxid.training._seed import _set_seed
 
 logger = logging.getLogger(__name__)
+
+_RARE_STRATEGY_VALUES: tuple[str, ...] = get_args(RareStrategy)
+
+# Sentinel for "caller did not pass this kwarg" — enables Synthetic preset
+# merging without colliding with legitimate None defaults.
+_UNSET: Any = object()
+
+
+def _normalize_distribution(distribution: Distribution | None) -> dict | None:
+    """Normalize a :class:`Distribution` input into its plain-dict form.
+
+    Accepts only :class:`Distribution` instances (or ``None``). Dict inputs
+    are rejected with :class:`TypeError`; use ``Distribution(column=..., ...)``
+    instead.
+    """
+    if distribution is None:
+        return None
+    if isinstance(distribution, Distribution):
+        return asdict(distribution)
+    raise TypeError(
+        "distribution must be a Distribution instance or None, got "
+        f"{type(distribution).__name__}. Use dataxid.Distribution(...) — "
+        "dict inputs are no longer supported as of v0.3.0."
+    )
+
+
+def _merge_field(
+    kwarg_value: Any,
+    synthetic: Synthetic | None,
+    field_name: str,
+    default: Any,
+) -> Any:
+    """Resolve a scalar ``generate`` kwarg against a ``Synthetic`` preset.
+
+    Priority: explicit kwarg > ``synthetic.<field>`` > ``default``.
+
+    ``kwarg_value is _UNSET`` means the caller did not pass the argument,
+    so the preset (or the ``default`` fallback) is consulted.
+    """
+    if kwarg_value is not _UNSET:
+        return kwarg_value
+    if synthetic is not None:
+        return getattr(synthetic, field_name)
+    return default
+
+
+def _merge_n(n_samples: int | None, synthetic: Synthetic | None) -> int | None:
+    """Resolve effective row count from ``n_samples`` and ``Synthetic.n``.
+
+    - Both unset → ``None`` (caller / downstream decides).
+    - Only one set → that value.
+    - Both set and equal → that value.
+    - Both set but conflicting → :class:`ValueError`.
+    """
+    preset_n = synthetic.n if synthetic is not None else None
+    if n_samples is None:
+        return preset_n
+    if preset_n is None or preset_n == n_samples:
+        return n_samples
+    raise ValueError(
+        f"n_samples ({n_samples}) conflicts with synthetic.n ({preset_n}). "
+        "Pass only one."
+    )
+
+
+def _normalize_bias(bias: Bias | None) -> dict | None:
+    """Normalize a :class:`Bias` input into its plain-dict form.
+
+    Accepts only :class:`Bias` instances (or ``None``). Dict inputs are
+    rejected with :class:`TypeError`; use ``Bias(target=..., sensitive=...)``
+    instead.
+    """
+    if bias is None:
+        return None
+    if isinstance(bias, Bias):
+        return asdict(bias)
+    raise TypeError(
+        "bias must be a Bias instance or None, got "
+        f"{type(bias).__name__}. Use dataxid.Bias(...) — "
+        "dict inputs are no longer supported as of v0.3.0."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Imputation aggregation helpers
+# ---------------------------------------------------------------------------
+
+def _mode_fn(x: np.ndarray) -> Any:
+    """Most frequent value, ignoring NaN."""
+    if pd.isna(x).all():
+        return np.nan
+    x_notna = x[~pd.isna(x)]
+    values, counts = np.unique(x_notna, return_counts=True)
+    return values[np.argmax(counts)]
+
+
+def _mean_fn(x: np.ndarray) -> float:
+    """Arithmetic mean, ignoring NaN."""
+    if pd.isna(x).all():
+        return np.nan
+    return float(np.nanmean(x[~pd.isna(x)]))
+
+
+def _median_fn(x: np.ndarray) -> float:
+    """Median, ignoring NaN."""
+    if pd.isna(x).all():
+        return np.nan
+    return float(np.nanmedian(x[~pd.isna(x)]))
+
+
+def _list_fn(x: np.ndarray) -> np.ndarray:
+    """Return all draws as-is."""
+    return np.array(x)
+
+
+_PICK_FN_MAP: dict[str, Callable] = {
+    "mode": _mode_fn,
+    "mean": _mean_fn,
+    "median": _median_fn,
+    "all": _list_fn,
+}
+
+
+def _resolve_pick(
+    pick: str | Callable,
+) -> tuple[Callable, bool]:
+    """Return ``(func, is_list_pick)``."""
+    if callable(pick) and not isinstance(pick, str):
+        return pick, False
+    if pick not in _PICK_FN_MAP:
+        raise ValueError(f"Unknown pick '{pick}'. Choose from {list(_PICK_FN_MAP)}")
+    return _PICK_FN_MAP[pick], pick == "all"
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +255,7 @@ class Model:
         client: DataxidClient,
         encoder: Encoder,
         data: pd.DataFrame,
-        config: dict[str, Any],
+        config: ModelConfig,
         parent: pd.DataFrame | None = None,
     ):
         self.id = model_id
@@ -153,27 +312,23 @@ class Model:
         )
         http = DataxidClient(api_key=api_key, base_url=base_url)
 
-        embedding_dim = config["embedding_dim"]
-        model_size = config["model_size"]
-        batch_size = config["batch_size"]
-        max_epochs = config["max_epochs"]
-        early_stop_patience = config["early_stop_patience"]
-        privacy_enabled = config["privacy_enabled"]
-        privacy_noise = config["privacy_noise"]
-        encoding_types = config["encoding_types"]
-        val_split = config["val_split"]
+        privacy = config.privacy
+
+        if config.seed is not None:
+            _set_seed(config.seed)
 
         # --- 1. Analyze locally ---
         logger.info("Analyzing data locally...")
         encoder = Encoder(
-            embedding_dim=embedding_dim,
-            model_size=model_size,
-            privacy_enabled=privacy_enabled,
-            privacy_noise=privacy_noise,
+            embedding_dim=config.embedding_dim,
+            model_size=config.model_size,
+            privacy_enabled=privacy.enabled,
+            privacy_noise=privacy.noise,
+            protect_rare=privacy.protect_rare,
         )
         metadata = encoder.analyze(
             data,
-            encoding_types=encoding_types,
+            encoding_types=config.encoding_types,
             parent=parent,
             parent_encoding_types=parent_encoding_types,
             foreign_key=foreign_key,
@@ -191,7 +346,7 @@ class Model:
         encoder.prepare(data, parent=parent, parent_key=parent_key)
 
         # --- 2. Register model on API ---
-        effective_embedding_dim = embedding_dim
+        effective_embedding_dim = config.embedding_dim
         if encoder.is_sequential and encoder._backend.encoder.ctx_compressor is not None:
             effective_embedding_dim = encoder._backend.encoder.ctx_compressor.dim_output
 
@@ -200,9 +355,9 @@ class Model:
             "metadata": metadata,
             "config": {
                 "embedding_dim": effective_embedding_dim,
-                "model_size": model_size,
-                "batch_size": batch_size,
-                "max_epochs": max_epochs,
+                "model_size": config.model_size,
+                "batch_size": config.batch_size,
+                "max_epochs": config.max_epochs,
             },
         })
         model_id = resp["data"]["id"]
@@ -221,10 +376,10 @@ class Model:
         # --- 3. Train ---
         train_frozen(
             model,
-            batch_size=batch_size,
-            max_epochs=max_epochs,
-            early_stop_patience=early_stop_patience,
-            val_split=val_split,
+            batch_size=config.batch_size,
+            max_epochs=config.max_epochs,
+            early_stop_patience=config.early_stop_patience,
+            val_split=config.val_split,
         )
 
         return model
@@ -232,8 +387,16 @@ class Model:
     def generate(
         self,
         n_samples: int | None = None,
-        seed_data: pd.DataFrame | None = None,
+        *,
+        synthetic: Synthetic | None = None,
+        conditions: pd.DataFrame | None = None,
         parent: pd.DataFrame | None = None,
+        seed: int | Any = _UNSET,
+        distribution: Distribution | None = None,
+        bias: Bias | None = None,
+        diversity: float | Any = _UNSET,
+        rare_cutoff: float | Any = _UNSET,
+        rare_strategy: RareStrategy | None | Any = _UNSET,
     ) -> pd.DataFrame:
         """
         Generate synthetic data from the trained model.
@@ -243,37 +406,229 @@ class Model:
         then flattens to a single DataFrame with entity key column.
 
         Args:
-            n_samples: Flat: number of rows. Sequential: number of entities.
-                       Defaults to len(training_data) or n_entities from training.
-            seed_data: DataFrame for conditional generation (flat only).
+            n_samples: Number of rows (flat) or entities (sequential) to generate.
+                For flat mode with ``conditions``, must be omitted or match
+                ``len(conditions)``; otherwise defaults to the training data size.
+            synthetic: Optional :class:`Synthetic` preset bundling scalar
+                generation-time tuning (``n``, ``seed``, ``diversity``,
+                ``rare_cutoff``, ``rare_strategy``). Keyword arguments passed
+                explicitly to ``generate`` always override fields of the
+                preset. ``conditions``, ``parent``, ``distribution`` and
+                ``bias`` are orthogonal and stay as separate arguments.
+            conditions: DataFrame for conditional generation. Columns present in
+                conditions are kept as-is; remaining columns are generated.
+                Flat: one row per output row.
+                Sequential: long-format with the foreign key column linking
+                events to entities (steps beyond condition length are free).
             parent: Parent table for generation. Falls back to training parent.
+            seed: Random seed for reproducible generation. None = non-deterministic.
+            distribution: Override the empirical distribution of a single
+                categorical column. See :class:`Distribution`.
+            bias: Bias-correction config for statistical parity across
+                sensitive groups. See :class:`Bias`.
+            diversity: Sampling diversity. ``1.0`` = model distribution,
+                ``<1.0`` = sharper (more deterministic), ``>1.0`` = flatter
+                (more diverse). Must be > 0.
+            rare_cutoff: Nucleus sampling cutoff in ``(0, 1]``. ``1.0`` disables
+                nucleus sampling (uses the full distribution). Lower values
+                restrict sampling to the smallest set of tokens whose cumulative
+                probability mass reaches ``rare_cutoff`` — trimming the rare tail.
+            rare_strategy: How to handle rare (infrequent) categorical values
+                during generation. When ``None`` (default), inherits from the
+                training-time setting on :class:`Privacy` (``privacy.rare_strategy``).
+                Explicit values override the config.
+                - ``"mask"``: Rare values in categorical columns may appear as
+                  the literal token ``"<protected>"``. Preserves the original
+                  distribution, including the presence of rare values.
+                - ``"sample"``: Suppress the ``"<protected>"`` token entirely.
+                  Rare slots are filled by sampling from the frequent
+                  categories. Use when you need clean string values in
+                  categorical columns.
 
         Returns:
             DataFrame with synthetic data
+
+        Raises:
+            ValueError: If both ``n_samples`` and ``conditions`` are provided and
+                their sizes disagree, if ``synthetic.n`` conflicts with
+                ``n_samples``, if ``bias`` is used in sequential mode,
+                or if ``diversity``/``rare_cutoff``/``rare_strategy``
+                are out of range.
+            TypeError: If ``synthetic`` is provided but is not a
+                :class:`Synthetic` instance.
+
+        Note:
+            For filling missing values, use :meth:`impute` — do not attempt
+            to emulate imputation through ``generate`` + ``conditions``.
         """
+        if synthetic is not None and not isinstance(synthetic, Synthetic):
+            raise TypeError(
+                "synthetic must be a Synthetic instance or None, got "
+                f"{type(synthetic).__name__}. Use dataxid.Synthetic(...)."
+            )
+
+        n_effective = _merge_n(n_samples, synthetic)
+        seed_effective = _merge_field(seed, synthetic, "seed", None)
+        diversity_effective = _merge_field(diversity, synthetic, "diversity", 1.0)
+        rare_cutoff_effective = _merge_field(rare_cutoff, synthetic, "rare_cutoff", 1.0)
+        rare_strategy_effective = _merge_field(
+            rare_strategy, synthetic, "rare_strategy", None
+        )
+
+        return self._generate_core(
+            n_samples=n_effective,
+            conditions=conditions,
+            parent=parent,
+            seed=seed_effective,
+            distribution=_normalize_distribution(distribution),
+            imputation=None,
+            bias=_normalize_bias(bias),
+            diversity=diversity_effective,
+            rare_cutoff=rare_cutoff_effective,
+            rare_strategy=rare_strategy_effective,
+        )
+
+    def _generate_core(
+        self,
+        n_samples: int | None = None,
+        conditions: pd.DataFrame | None = None,
+        parent: pd.DataFrame | None = None,
+        seed: int | None = None,
+        distribution: dict | None = None,
+        imputation: dict | None = None,
+        bias: dict | None = None,
+        diversity: float = 1.0,
+        rare_cutoff: float = 1.0,
+        rare_strategy: RareStrategy | None = None,
+    ) -> pd.DataFrame:
+        """Shared generation path used by :meth:`generate` and :meth:`impute`.
+
+        The ``imputation`` argument is only set by :meth:`impute` — public
+        callers should go through :meth:`generate` instead.
+        """
+        if diversity <= 0:
+            raise ValueError(f"diversity must be > 0, got {diversity}")
+        if not (0 < rare_cutoff <= 1.0):
+            raise ValueError(f"rare_cutoff must be in (0, 1], got {rare_cutoff}")
+        if rare_strategy is None:
+            rare_strategy = self._config.privacy.rare_strategy
+        if rare_strategy not in _RARE_STRATEGY_VALUES:
+            raise ValueError(
+                f"rare_strategy must be one of "
+                f"{_RARE_STRATEGY_VALUES}, "
+                f"got {rare_strategy!r}"
+            )
+
         ctx = parent if parent is not None else self._parent
 
         if self._encoder.is_sequential:
-            return self._generate_sequential(n_samples=n_samples, parent=ctx)
+            if bias:
+                raise ValueError("bias is not supported in sequential mode")
+            return self._generate_sequential(
+                n_samples=n_samples, conditions=conditions, parent=ctx,
+                seed=seed, distribution=distribution, imputation=imputation,
+                diversity=diversity, rare_cutoff=rare_cutoff,
+                rare_strategy=rare_strategy,
+            )
 
-        n = n_samples or getattr(self, "_n_samples", None) or len(self._data)
+        # flat mode: conditions row count = output row count
+        if conditions is not None and n_samples is not None and n_samples != len(conditions):
+            raise ValueError(
+                f"n_samples ({n_samples}) conflicts with conditions length "
+                f"({len(conditions)}). When conditions is provided, omit n_samples "
+                f"or set it to len(conditions)."
+            )
+
+        n = (
+            len(conditions) if conditions is not None
+            else n_samples or getattr(self, "_n_samples", None) or len(self._data)
+        )
         logger.info("Generating %d synthetic rows...", n)
         embedding = self._encoder._generation_embedding(
-            n_samples=n, seed_data=seed_data, parent=ctx,
+            n_samples=n, conditions=None, parent=ctx,
         )
 
         column_stats = self._encoder.column_stats
-        fixed_probs = compute_fixed_probs(column_stats) if column_stats else None
+        features = self._encoder.features
+
+        impute_cols = imputation.get("columns", []) if imputation else []
+
+        # --- fixed_probs ---
+        rare_probs = (
+            compute_fixed_probs(column_stats, mode=rare_strategy)
+            if column_stats else {}
+        )
+        impute_probs = (
+            compute_imputation_probs(column_stats, impute_cols)
+            if impute_cols and column_stats else {}
+        )
+        dist_probs = (
+            compute_distribution_probs(column_stats, distribution)
+            if distribution and column_stats else {}
+        )
+        all_probs = [p for p in (rare_probs, impute_probs, dist_probs) if p]
+        fixed_probs = merge_fixed_probs(*all_probs) if all_probs else None
+
+        # --- fixed_values + column_order ---
+        fixed_values = None
+        conditions_cols: list[str] = []
+        if conditions is not None and column_stats:
+            fixed_values = encode_conditions_fixed_values(
+                conditions, features, column_stats,
+                imputed_columns=impute_cols or None,
+            )
+            conditions_cols = [c for c in features if c in conditions.columns]
+
+        if bias and column_stats:
+            column_order = bias_column_order(
+                features, bias,
+                conditions_columns=conditions_cols or None,
+                distribution=distribution,
+                imputed_columns=impute_cols or None,
+            )
+        elif conditions is not None and column_stats:
+            if impute_cols:
+                column_order = imputation_column_order(
+                    features, impute_cols,
+                    conditions_columns=conditions_cols, distribution=distribution,
+                )
+            else:
+                column_order = conditional_column_order(features, conditions_cols, distribution)
+        elif distribution:
+            column_order = distribution_column_order(features, distribution)
+        else:
+            column_order = None
+
+        # --- bias payload (resolved column names + integer codes) ---
+        bias_payload = None
+        if bias and column_stats:
+            bias_payload = resolve_bias_payload(column_stats, bias)
 
         payload: dict[str, Any] = {"embedding": embedding}
         if fixed_probs:
             payload["fixed_probs"] = fixed_probs
+        if fixed_values:
+            payload["fixed_values"] = fixed_values
+        if column_order:
+            payload["column_order"] = column_order
+        if seed is not None:
+            payload["seed"] = seed
+        if impute_cols:
+            payload["imputation_columns"] = impute_cols
+        if bias_payload:
+            payload["bias"] = bias_payload
+        if diversity != 1.0:
+            payload["diversity"] = diversity
+        if rare_cutoff != 1.0:
+            payload["rare_cutoff"] = rare_cutoff
 
         resp = self._client.post(f"/v1/models/{self.id}/generate", json=payload)
 
         raw_codes = resp["data"]["codes"]
-        features = self._encoder.features
-        df = decode_columns(raw_codes, features, column_stats)
+        df = decode_columns(
+            raw_codes, features, column_stats,
+            rare_strategy=rare_strategy,
+        )
 
         fk_col = self._encoder._foreign_key
         if fk_col and ctx is not None and self._encoder._parent_key:
@@ -292,9 +647,22 @@ class Model:
     def _generate_sequential(
         self,
         n_samples: int | None = None,
+        conditions: pd.DataFrame | None = None,
         parent: pd.DataFrame | None = None,
+        seed: int | None = None,
+        distribution: dict | None = None,
+        imputation: dict | None = None,
+        diversity: float = 1.0,
+        rare_cutoff: float = 1.0,
+        rare_strategy: RareStrategy = "mask",
     ) -> pd.DataFrame:
-        """Sequential generation: context embedding → autoregressive decode → flatten."""
+        """Sequential generation: context embedding → autoregressive decode → flatten.
+
+        When ``conditions`` is provided it must be long-format (one row per
+        time step) with the foreign-key column linking events to entities.
+        Condition steps are encoded per-entity and sent as 2D fixed_values;
+        steps beyond the condition length are freely generated.
+        """
         from dataxid.encoder._nn import RIDX_PREFIX, SIDX_PREFIX, SLEN_PREFIX
 
         if parent is not None and self._encoder.has_context:
@@ -310,7 +678,61 @@ class Model:
         )
 
         column_stats = self._encoder.column_stats
-        fixed_probs = compute_fixed_probs(column_stats) if column_stats else None
+        features = self._encoder.features
+        context_key = self._encoder._foreign_key
+        impute_cols = imputation.get("columns", []) if imputation else []
+
+        # --- fixed_probs ---
+        rare_probs = (
+            compute_fixed_probs(column_stats, mode=rare_strategy)
+            if column_stats else {}
+        )
+        impute_probs = (
+            compute_imputation_probs(column_stats, impute_cols)
+            if impute_cols and column_stats else {}
+        )
+        dist_probs = (
+            compute_distribution_probs(column_stats, distribution)
+            if distribution and column_stats else {}
+        )
+        all_probs = [p for p in (rare_probs, impute_probs, dist_probs) if p]
+        fixed_probs = merge_fixed_probs(*all_probs) if all_probs else None
+
+        # --- fixed_values + column_order ---
+        fixed_values = None
+        if conditions is not None and column_stats and context_key:
+            if context_key not in conditions.columns:
+                raise ValueError(
+                    f"Sequential conditions must contain the foreign key column "
+                    f"'{context_key}'. Got columns: {list(conditions.columns)}"
+                )
+            pk_col = self._encoder._parent_key
+            training_parent = self._parent
+            entity_order = (
+                training_parent[pk_col].values
+                if training_parent is not None and pk_col and pk_col in training_parent.columns
+                else None
+            )
+            fixed_values, _ = encode_sequential_conditions_fixed_values(
+                conditions, features, column_stats, context_key, n_entities,
+                entity_order=entity_order,
+                imputed_columns=impute_cols or None,
+            )
+            conditions_cols = [
+                c for c in features
+                if c in conditions.columns and c != context_key
+            ]
+            if impute_cols:
+                column_order = imputation_column_order(
+                    features, impute_cols,
+                    conditions_columns=conditions_cols, distribution=distribution,
+                )
+            else:
+                column_order = conditional_column_order(features, conditions_cols, distribution)
+        elif distribution:
+            column_order = distribution_column_order(features, distribution)
+        else:
+            column_order = None
 
         payload: dict[str, Any] = {
             "embedding": embedding,
@@ -319,6 +741,18 @@ class Model:
         }
         if fixed_probs:
             payload["fixed_probs"] = fixed_probs
+        if fixed_values:
+            payload["fixed_values"] = fixed_values
+        if column_order:
+            payload["column_order"] = column_order
+        if seed is not None:
+            payload["seed"] = seed
+        if impute_cols:
+            payload["imputation_columns"] = impute_cols
+        if diversity != 1.0:
+            payload["diversity"] = diversity
+        if rare_cutoff != 1.0:
+            payload["rare_cutoff"] = rare_cutoff
 
         resp = self._client.post(f"/v1/models/{self.id}/generate", json=payload)
         raw_codes = resp["data"]["codes"]
@@ -359,7 +793,10 @@ class Model:
 
         df_flat = pd.DataFrame(rows)
         features = self._encoder.features
-        df = decode_columns(df_flat.to_dict(orient="list"), features, column_stats)
+        df = decode_columns(
+            df_flat.to_dict(orient="list"), features, column_stats,
+            rare_strategy=rare_strategy,
+        )
 
         fk_col = self._encoder._foreign_key
         if fk_col:
@@ -379,6 +816,137 @@ class Model:
         self.status = "ready"
         logger.info("Generated %d event rows for %d entities", len(df), n_entities)
         return df
+
+    def impute(
+        self,
+        X: pd.DataFrame,
+        parent: pd.DataFrame | None = None,
+        trials: int = 1,
+        pick: Literal["mode", "mean", "median", "all"] | Callable[[np.ndarray], Any] = "mode",
+        **kwargs,
+    ) -> pd.DataFrame:
+        """Fill missing values in *X* using the trained model.
+
+        Each ``NULL`` cell is replaced by the model's prediction, conditioned
+        on the non-NULL cells in the same row (flat) or entity (sequential).
+        Non-NULL values are always preserved.
+
+        Args:
+            X: Data with missing values.
+
+                * **Flat models** — one row per sample, columns a subset of
+                  the training features.
+                * **Sequential models** — long-format with the foreign-key
+                  column linking events to entities.
+
+            parent: Parent / context table. Falls back to the training parent.
+            trials: How many independent generation passes to run per row.
+                When ``trials > 1`` the results are aggregated cell-wise
+                using *pick*.
+            pick: Aggregation strategy across trials.
+
+                * ``"mode"`` — most frequent value (default, works for all dtypes).
+                * ``"mean"`` — arithmetic mean (numeric columns only).
+                * ``"median"`` — median (numeric columns only).
+                * ``"all"`` — return every trial as a Python list per cell.
+                * Any ``Callable[[np.ndarray], scalar]``.
+
+            **kwargs: Forwarded to :meth:`generate` (e.g. ``seed``,
+                ``distribution``).
+
+        Returns:
+            DataFrame shaped like *X* with NULL cells filled.
+
+        Example::
+
+            model = dataxid.train(df)
+            df_dirty = df.copy()
+            df_dirty.loc[0:10, "age"] = None
+            df_clean = model.impute(df_dirty)
+        """
+        X_df = X.copy().reset_index(drop=True)
+
+        fk = self._encoder._foreign_key
+        feature_cols = [c for c in X_df.columns if c != fk]
+        null_cols = [c for c in feature_cols if c in X_df.columns and X_df[c].isna().any()]
+        imputation_config = {"columns": null_cols}
+
+        if "distribution" in kwargs:
+            kwargs["distribution"] = _normalize_distribution(kwargs["distribution"])
+        if "bias" in kwargs:
+            kwargs["bias"] = _normalize_bias(kwargs["bias"])
+
+        synthetic = kwargs.pop("synthetic", None)
+        if synthetic is not None and not isinstance(synthetic, Synthetic):
+            raise TypeError(
+                "synthetic must be a Synthetic instance or None, got "
+                f"{type(synthetic).__name__}. Use dataxid.Synthetic(...)."
+            )
+        if synthetic is not None:
+            if "n_samples" in kwargs:
+                kwargs["n_samples"] = _merge_n(kwargs["n_samples"], synthetic)
+            elif synthetic.n is not None:
+                kwargs["n_samples"] = synthetic.n
+            for field_name in ("seed", "diversity", "rare_cutoff", "rare_strategy"):
+                if field_name not in kwargs:
+                    kwargs[field_name] = getattr(synthetic, field_name)
+                # else: explicit kwarg wins over preset
+
+        def _single_draw() -> pd.DataFrame:
+            return self._generate_core(
+                conditions=X_df,
+                parent=parent,
+                imputation=imputation_config,
+                **kwargs,
+            )
+
+        if trials == 1:
+            result = _single_draw()
+        else:
+            pick_fn, is_list_pick = _resolve_pick(pick)
+            all_trials = [_single_draw() for _ in range(trials)]
+
+            result = all_trials[0].copy()
+            for col in feature_cols:
+                if col not in result.columns:
+                    continue
+                col_values = np.column_stack([d[col].values for d in all_trials])
+                if is_list_pick:
+                    result[col] = [pick_fn(row) for row in col_values]
+                else:
+                    result[col] = np.apply_along_axis(pick_fn, 1, col_values)
+
+        # Preserve original non-NULL values from seed data.
+        result = result.reset_index(drop=True)
+        X_aligned = X_df.reset_index(drop=True)
+
+        if fk is None:
+            # Flat mode: 1:1 row correspondence
+            n = min(len(result), len(X_aligned))
+            for col in feature_cols:
+                if col in result.columns and col in X_aligned.columns:
+                    mask = X_aligned[col].iloc[:n].notna()
+                    result.loc[mask[mask].index, col] = X_aligned.loc[mask[mask].index, col]
+        else:
+            # Sequential mode: align per entity using the foreign key
+            orig_groups = X_aligned.groupby(fk, sort=False)
+            imp_groups = result.groupby(fk, sort=False)
+            for eid, orig_grp in orig_groups:
+                if eid not in imp_groups.groups:
+                    continue
+                imp_idx = imp_groups.groups[eid]
+                n_overlap = min(len(orig_grp), len(imp_idx))
+                for col in feature_cols:
+                    if col not in result.columns or col not in X_aligned.columns:
+                        continue
+                    orig_vals = orig_grp[col].iloc[:n_overlap]
+                    known = orig_vals.notna()
+                    if not known.any():
+                        continue
+                    target_idx = imp_idx[:n_overlap][known.values]
+                    result.loc[target_idx, col] = orig_vals[known].values
+
+        return result
 
     def delete(self) -> None:
         """Delete the model and free server resources."""

@@ -159,7 +159,7 @@ def _analyze_character(values: pd.Series, root_keys: pd.Series) -> dict:
 
 def _reduce_categorical(
     stats_list: list[dict],
-    value_protection: bool = True,
+    protect_rare: bool = True,
     epsilon: float | None = None,
 ) -> dict:
     cnt_values: dict[str, int] = {}
@@ -169,7 +169,7 @@ def _reduce_categorical(
     cnt_values = dict(sorted(cnt_values.items()))
     known = list(cnt_values.keys())
 
-    if value_protection:
+    if protect_rare:
         if epsilon is not None:
             categories, _ = private_filter(cnt_values, epsilon, threshold=5)
         else:
@@ -193,7 +193,7 @@ def _reduce_categorical(
 
 def _reduce_numeric(
     stats_list: list[dict],
-    value_protection: bool = True,
+    protect_rare: bool = True,
     epsilon: float | None = None,
     encoding_type: EncodingType | None = EncodingType.numeric_auto,
 ) -> dict:
@@ -208,7 +208,7 @@ def _reduce_numeric(
     reduced_min_n = sorted([v for s in stats_list for v in s["min_n"]])
     reduced_max_n = sorted([v for s in stats_list for v in s["max_n"]], reverse=True)
 
-    if value_protection:
+    if protect_rare:
         if len(reduced_min_n) < _BOUNDS_MIN_N or len(reduced_max_n) < _BOUNDS_MIN_N:
             reduced_min = reduced_max = None
         else:
@@ -243,7 +243,7 @@ def _reduce_numeric(
             for value, count in item["cnt_values"].items():
                 cnt_values[value] = cnt_values.get(value, 0) + count
         cnt_total = sum(cnt_values.values())
-        if value_protection:
+        if protect_rare:
             if epsilon is not None:
                 categories, non_rare_ratio = private_filter(cnt_values, epsilon, threshold=5)
             else:
@@ -326,7 +326,7 @@ def _reduce_numeric(
 
 def _reduce_datetime(
     stats_list: list[dict],
-    value_protection: bool = True,
+    protect_rare: bool = True,
     epsilon: float | None = None,
 ) -> dict:
     has_nan = any(s["has_nan"] for s in stats_list)
@@ -341,7 +341,7 @@ def _reduce_datetime(
     reduced_min_n = sorted([v for s in stats_list for v in s["min_n"]])
     reduced_max_n = sorted([v for s in stats_list for v in s["max_n"]], reverse=True)
 
-    if value_protection:
+    if protect_rare:
         if len(reduced_min_n) < _BOUNDS_MIN_N or len(reduced_max_n) < _BOUNDS_MIN_N:
             reduced_min = reduced_max = None
             has_time = has_ms = False
@@ -390,7 +390,7 @@ def _reduce_datetime(
 
 def _reduce_character(
     stats_list: list[dict],
-    value_protection: bool = True,
+    protect_rare: bool = True,
     epsilon: float | None = None,
 ) -> dict:
     max_len = max(s["max_string_length"] for s in stats_list)
@@ -403,7 +403,7 @@ def _reduce_character(
                 cnt[value] = cnt.get(value, 0) + count
         cnt = dict(sorted(cnt.items()))
         known = list(cnt.keys())
-        if value_protection:
+        if protect_rare:
             if epsilon is not None:
                 cats, _ = private_filter(cnt, epsilon, threshold=5)
             else:
@@ -499,7 +499,7 @@ def detect_encoding(series: pd.Series, column_name: str = "") -> EncodingType:
 def compute_stats(
     df: pd.DataFrame,
     features: list[str],
-    value_protection: bool = True,
+    protect_rare: bool = True,
     encoding_types: dict[str, str | EncodingType] | None = None,
 ) -> dict[str, dict]:
     """Analyze raw features and produce column_stats for encoding."""
@@ -523,7 +523,7 @@ def compute_stats(
 
         if enc_type == EncodingType.categorical:
             partition = _analyze_categorical(series, root_keys)
-            stats = _reduce_categorical([partition], value_protection=value_protection)
+            stats = _reduce_categorical([partition], protect_rare=protect_rare)
 
         elif enc_type in (
             EncodingType.numeric_auto, EncodingType.numeric_binned,
@@ -531,16 +531,16 @@ def compute_stats(
         ):
             partition = _analyze_numeric(series, root_keys, enc_type)
             stats = _reduce_numeric(
-                [partition], value_protection=value_protection, encoding_type=enc_type,
+                [partition], protect_rare=protect_rare, encoding_type=enc_type,
             )
 
         elif enc_type == EncodingType.datetime:
             partition = _analyze_datetime(series, root_keys)
-            stats = _reduce_datetime([partition], value_protection=value_protection)
+            stats = _reduce_datetime([partition], protect_rare=protect_rare)
 
         elif enc_type == EncodingType.character:
             partition = _analyze_character(series, root_keys)
-            stats = _reduce_character([partition], value_protection=value_protection)
+            stats = _reduce_character([partition], protect_rare=protect_rare)
 
         else:
             logger.warning(
@@ -548,7 +548,7 @@ def compute_stats(
                 enc_type, feature,
             )
             partition = _analyze_categorical(series, root_keys)
-            stats = _reduce_categorical([partition], value_protection=value_protection)
+            stats = _reduce_categorical([partition], protect_rare=protect_rare)
             enc_type = EncodingType.categorical
 
         if "encoding_type" not in stats:

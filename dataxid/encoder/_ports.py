@@ -92,8 +92,13 @@ class EncoderPort(Protocol):
         encoding_types: dict[str, str] | None = None,
         parent: pd.DataFrame | None = None,
         parent_encoding_types: dict[str, str] | None = None,
+        protect_rare: bool = True,
     ) -> None:
-        """Analyze raw data → populate schema and build encoder network."""
+        """Analyze raw data → populate schema and build encoder network.
+
+        When ``protect_rare`` is True, rare categorical values are replaced
+        with the ``<protected>`` sentinel before the vocabulary is built.
+        """
         ...
 
     def _compute_priors(

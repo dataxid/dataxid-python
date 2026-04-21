@@ -32,7 +32,8 @@ def train_frozen(
     val_split: float = 0.1,
 ) -> None:
     """Freeze encoder, encode all batches once, train asynchronously."""
-    initial_lr = model._config["learning_rate"] or float(
+    config = model._config
+    initial_lr = config.learning_rate or float(
         np.round(0.001 * np.sqrt(batch_size / 32), 5)
     )
 
@@ -48,15 +49,21 @@ def train_frozen(
     val_count = sum(1 for b in batches if b["is_validation"])
     logger.info("Encoded %d train + %d val batches", train_count, val_count)
 
-    model._client.post(f"/v1/models/{model.id}/init-training", json={
+    init_payload: dict = {
         "max_epochs": max_epochs,
         "patience": early_stop_patience,
         "learning_rate": initial_lr,
-        "label_smoothing": model._config["label_smoothing"],
-        "embedding_dropout": model._config["embedding_dropout"],
-        "time_limit_seconds": model._config["time_limit_seconds"],
+        "label_smoothing": config.label_smoothing,
+        "embedding_dropout": config.embedding_dropout,
+        "time_limit_seconds": config.time_limit_seconds,
         "batches": batches,
-    }, idempotent=False)
+    }
+    if config.seed is not None:
+        init_payload["seed"] = config.seed
+
+    model._client.post(
+        f"/v1/models/{model.id}/init-training", json=init_payload, idempotent=False,
+    )
 
     logger.info("Starting async training: max_epochs=%d", max_epochs)
     resp = model._client.post(
@@ -67,7 +74,7 @@ def train_frozen(
         _process_sync_result(model, resp["data"], max_epochs)
         return
 
-    _poll_training(model, timeout=model._config["timeout"], max_epochs=max_epochs)
+    _poll_training(model, timeout=config.timeout, max_epochs=max_epochs)
 
 
 def _poll_training(model: Model, timeout: float, max_epochs: int) -> None:

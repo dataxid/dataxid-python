@@ -1,7 +1,7 @@
 # Copyright (c) 2026 DataXID Teknoloji ve Ticaret A.Ş.
 # SPDX-License-Identifier: Apache-2.0
 """
-Encoder wrapper — manages the encoding lifecycle and wire-format conversion.
+Encoder wrapper — manages the encoding lifecycle and API payload preparation.
 
 Raw data stays local. Only metadata, embeddings, and targets are sent to the API.
 """
@@ -46,12 +46,14 @@ class Encoder:
         model_size: str = "medium",
         privacy_enabled: bool = False,
         privacy_noise: float = 0.1,
+        protect_rare: bool = True,
         device: str = "cpu",
     ):
         self._embedding_dim = embedding_dim
         self._model_size = model_size
         self._privacy_enabled = privacy_enabled
         self._privacy_noise = privacy_noise
+        self._protect_rare = protect_rare
         self._device = device
         self._backend: EncoderPort | None = None
         self._optimizer: torch.optim.Optimizer | None = None
@@ -124,6 +126,7 @@ class Encoder:
             encoding_types=encoding_types,
             parent=ctx_for_analyze,
             parent_encoding_types=parent_encoding_types,
+            protect_rare=self._protect_rare,
         )
 
         self._optimizer = torch.optim.AdamW(
@@ -416,13 +419,14 @@ class Encoder:
     def _generation_embedding(
         self,
         n_samples: int,
-        seed_data: pd.DataFrame | None = None,
+        conditions: pd.DataFrame | None = None,
         parent: pd.DataFrame | None = None,
     ) -> dict[str, Any]:
-        """Produce embedding for generation.
+        """Produce the embedding used to drive generation.
 
-        Sequential mode: context-only embedding via FeatureCompressor.
-        Flat mode: full embedding (target + context) or zero embedding.
+        Sequential mode: context-only embedding derived from the parent table.
+        Non-sequential mode: full embedding (target + optional context) when
+        conditions are provided, otherwise a zero embedding of the right size.
         """
         self._check_ready()
 
@@ -440,9 +444,9 @@ class Encoder:
                 )
             return serialize_embedding(embedding)
 
-        if seed_data is not None:
+        if conditions is not None:
             ctx_clean = parent[self.ctx_features] if (parent is not None and self.ctx_features) else parent
-            embedding = self._backend.encode(seed_data, ctx_df=ctx_clean)
+            embedding = self._backend.encode(conditions, ctx_df=ctx_clean)
             if self._privacy_enabled:
                 embedding = self._add_noise(embedding)
         else:

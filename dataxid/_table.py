@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from dataxid._pk import PK_TYPES, PkType, generate_primary_keys
 from dataxid.exceptions import InvalidRequestError
 
 # ---------------------------------------------------------------------------
@@ -35,7 +36,7 @@ class Table:
     Args:
         data: Training DataFrame for this table.
         primary_key: Column name to use as primary key. Excluded from training,
-            auto-assigned after generation (1-based auto-increment).
+            auto-assigned after generation according to ``pk_type``.
         foreign_keys: Foreign key mapping ``{fk_column: parent_Table}``.
             When ``sequential`` is True (default), the child table is generated
             conditioned on the parent — preserving correlations. FK values in
@@ -48,6 +49,12 @@ class Table:
             the table has multiple foreign keys. Must be a key in
             ``foreign_keys``. Required when ``len(foreign_keys) > 1`` and
             ``sequential`` is True; ignored otherwise.
+        pk_type: Primary-key format used when assigning synthetic keys.
+            - ``"dxid"`` (default): ``dxid_`` prefix + 22 char base62 body.
+              Globally unique, URL/DB safe, 128-bit entropy.
+            - ``"int"``: 1-based auto-increment integers.
+            - ``"uuid"``: standard UUID v4 strings.
+            Ignored when ``primary_key`` is ``None``.
     """
 
     data: pd.DataFrame
@@ -55,12 +62,18 @@ class Table:
     foreign_keys: dict[str, Table] = field(default_factory=dict)
     sequential: bool = True
     sequence_by: str | None = None
+    pk_type: PkType = "dxid"
 
     def __post_init__(self) -> None:
         if not isinstance(self.data, pd.DataFrame):
             raise InvalidRequestError(
                 f"Table.data must be a DataFrame, got {type(self.data).__name__}.",
                 param="data",
+            )
+        if self.pk_type not in PK_TYPES:
+            raise InvalidRequestError(
+                f"pk_type must be one of {PK_TYPES}, got {self.pk_type!r}.",
+                param="pk_type",
             )
         if self.primary_key is not None and self.primary_key not in self.data.columns:
             raise InvalidRequestError(
@@ -199,10 +212,12 @@ def _topological_sort(tables: dict[str, Table]) -> list[str] | None:
 # PK / FK helpers
 # ---------------------------------------------------------------------------
 
-def _assign_primary_keys(df: pd.DataFrame, pk_column: str) -> pd.DataFrame:
-    """Insert 1-based auto-increment primary key as first column."""
+def _assign_primary_keys(
+    df: pd.DataFrame, pk_column: str, pk_type: PkType = "dxid",
+) -> pd.DataFrame:
+    """Insert a freshly generated primary key column at position 0."""
     result = df.copy()
-    result.insert(0, pk_column, range(1, len(result) + 1))
+    result.insert(0, pk_column, generate_primary_keys(pk_type, len(result)))
     return result
 
 
@@ -212,9 +227,19 @@ def _remap_foreign_keys(
     parent_df: pd.DataFrame,
     parent_pk: str,
 ) -> pd.DataFrame:
-    """Ensure all FK values in child exist in the synthetic parent's PK domain."""
+    """Ensure all FK values in child exist in the synthetic parent's PK domain.
+
+    When the parent's synthetic PK dtype differs from the child's FK dtype
+    (e.g. parent was regenerated as ``dxid`` strings while the child still
+    holds the original integer keys), the FK column is first cast to the
+    parent PK dtype so the remap stays type-consistent.
+    """
     valid_pks = set(parent_df[parent_pk])
     result = child_df.copy()
+
+    parent_dtype = parent_df[parent_pk].dtype
+    if result[fk_column].dtype != parent_dtype:
+        result[fk_column] = result[fk_column].astype(parent_dtype)
 
     orphan_mask = ~result[fk_column].isin(valid_pks)
     if orphan_mask.any():

@@ -1,6 +1,6 @@
 [project]
 name = "dataxid"
-version = "0.2.0"
+version = "0.3.0"
 description = "The Synthetic Data API — privacy-preserving synthetic data generation"
 authors = [{ name = "Dataxid", email = "dev@dataxid.com" }]
 requires-python = ">=3.10"
@@ -30,6 +30,7 @@ dependencies = [
     "pyarrow>=13.0.0",
     "torch>=2.9.0,<2.10.0",
     "numpy>=2.0.0",
+    "typing-extensions>=4.5",
 ]
 
 [project.urls]
