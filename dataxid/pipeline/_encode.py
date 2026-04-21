@@ -1,11 +1,11 @@
 # Copyright (c) 2026 DataXID Teknoloji ve Ticaret A.Ş.
 # SPDX-License-Identifier: Apache-2.0
 """
-Encoding pipeline for the Dataxid SDK.
+Encoding pipeline for the DataXID SDK.
 
-Converts raw tabular data into integer-coded sub-columns using the column_stats
-produced by the analysis pipeline (_analyze.py). Each sub-column maps to one
-nn.Embedding in the encoder network.
+Converts raw tabular data into integer-coded sub-columns using the per-column
+statistics produced by the analysis step. Each sub-column maps to one
+embedding in the encoder network.
 
 Supported encoding types:
   - categorical
@@ -242,6 +242,44 @@ def _encode_character(values: pd.Series, stats: dict) -> pd.DataFrame:
 
 
 # ===================================================================
+# Imputation helpers
+# ===================================================================
+
+def _build_null_masks(
+    conditions: pd.DataFrame,
+    conditions_features: list[str],
+    column_stats: dict[str, dict],
+    imputed_columns: list[str],
+) -> dict[str, np.ndarray]:
+    """Return ``{wire_key: bool_mask}`` where True = originally NaN in an imputed column.
+
+    For each imputed feature that is part of *conditions_features*, checks
+    which rows in ``conditions`` are NaN and maps them to the corresponding
+    wire-key sub-columns. The mask is used to replace NULL token codes with
+    the ``-1`` sentinel so the decoder samples freely.
+    """
+    masks: dict[str, np.ndarray] = {}
+    for feature in imputed_columns:
+        if feature not in conditions_features or feature not in column_stats:
+            continue
+        is_null = conditions[feature].isna().values
+        if not is_null.any():
+            continue
+        stats = column_stats[feature]
+        raw_et = stats.get("encoding_type", EncodingType.categorical)
+        et = EncodingType(raw_et) if isinstance(raw_et, str) else raw_et
+        if et == EncodingType.categorical:
+            masks[wire_key(feature, "cat")] = is_null
+        elif et == EncodingType.numeric_discrete:
+            masks[wire_key(feature, "cat")] = is_null
+        elif et == EncodingType.numeric_binned:
+            masks[wire_key(feature, "bin")] = is_null
+        elif stats.get("has_nan"):
+            masks[wire_key(feature, "nan")] = is_null
+    return masks
+
+
+# ===================================================================
 # Public API
 # ===================================================================
 
@@ -290,3 +328,111 @@ def encode_columns(
             encoded[wire_key(feature, col)] = df_enc[col].values
 
     return encoded
+
+
+def encode_conditions_fixed_values(
+    conditions: pd.DataFrame,
+    features: list[str],
+    column_stats: dict[str, dict],
+    imputed_columns: list[str] | None = None,
+) -> dict[str, list[int]]:
+    """Encode conditions into wire-key fixed values for non-sequential generation.
+
+    Only columns present in *both* ``conditions`` and ``features`` are encoded.
+    The result is JSON-serialisable (``list[int]`` values) so it can be sent
+    directly in the API payload.
+
+    When *imputed_columns* is given, NULL cells in those columns are encoded as
+    ``-1`` (sentinel) instead of the NULL token code, allowing the decoder to
+    sample freely while ``fixed_probs`` suppresses the NULL token.
+
+    Args:
+        conditions: DataFrame whose columns are a subset of the training features.
+        features: All training feature names (from ``analyze()``).
+        column_stats: Column statistics from ``analyze()``.
+        imputed_columns: Feature names being imputed — their NaN cells become ``-1``.
+
+    Returns:
+        ``{wire_key: [int, ...]}`` — one entry per sub-column of the conditions features.
+    """
+    conditions_features = [f for f in features if f in conditions.columns]
+    if not conditions_features:
+        return {}
+
+    encoded = encode_columns(conditions, conditions_features, column_stats)
+
+    if imputed_columns:
+        null_masks = _build_null_masks(conditions, conditions_features, column_stats, imputed_columns)
+        for wk, mask in null_masks.items():
+            if wk in encoded:
+                arr = encoded[wk].copy()
+                arr[mask] = -1
+                encoded[wk] = arr
+
+    return {k: v.tolist() for k, v in encoded.items()}
+
+
+def encode_sequential_conditions_fixed_values(
+    conditions: pd.DataFrame,
+    features: list[str],
+    column_stats: dict[str, dict],
+    context_key: str,
+    n_entities: int,
+    entity_order: list | np.ndarray | None = None,
+    imputed_columns: list[str] | None = None,
+) -> tuple[dict[str, list[list[int]]], int]:
+    """Encode long-format conditions DataFrame into 2D fixed_values for sequential generation.
+
+    Each row in ``conditions`` is one time step. Rows are grouped by
+    ``context_key`` and aligned to ``entity_order``. Entities without
+    condition rows and shorter sequences are right-padded with ``-1``
+    (sentinel) to ``n_conditions_steps``. Sentinel values are skipped
+    during generation, allowing those entity-steps to be freely sampled.
+
+    When *imputed_columns* is given, NULL cells in those columns are encoded
+    as ``-1`` instead of the NULL token code, so the decoder samples freely
+    while ``fixed_probs`` suppresses the NULL token.
+
+    Returns:
+        Tuple of ``({wire_key: [[step0, step1, ...], ...]}, n_conditions_steps)``.
+        Outer list has ``n_entities`` entries; inner lists have ``n_conditions_steps``.
+    """
+    conditions_features = [f for f in features if f in conditions.columns and f != context_key]
+    if not conditions_features:
+        return {}, 0
+
+    encoded = encode_columns(conditions, conditions_features, column_stats)
+
+    if imputed_columns:
+        null_masks = _build_null_masks(conditions, conditions_features, column_stats, imputed_columns)
+        for wk, mask in null_masks.items():
+            if wk in encoded:
+                arr = encoded[wk].copy()
+                arr[mask] = -1
+                encoded[wk] = arr
+
+    groups = conditions.groupby(context_key, sort=False)
+    n_conditions_steps = groups.size().max()
+
+    if entity_order is None:
+        entity_order = conditions[context_key].unique()
+
+    result: dict[str, list[list[int]]] = {k: [] for k in encoded}
+    row_offset = 0
+    key_to_rows: dict = {}
+    for ek, grp in groups:
+        key_to_rows[ek] = (row_offset, len(grp))
+        row_offset += len(grp)
+
+    for entity_idx in range(n_entities):
+        ek = entity_order[entity_idx] if entity_idx < len(entity_order) else None
+        for wk, arr in encoded.items():
+            if ek is not None and ek in key_to_rows:
+                start, length = key_to_rows[ek]
+                steps = arr[start:start + length].tolist()
+            else:
+                steps = []
+            padded = steps + [-1] * (n_conditions_steps - len(steps))
+            result[wk].append(padded)
+
+    return result, int(n_conditions_steps)
