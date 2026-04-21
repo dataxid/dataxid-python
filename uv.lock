@@ -48,7 +48,7 @@ wheels = [
 
 [[package]]
 name = "dataxid"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -58,6 +58,7 @@ dependencies = [
     { name = "pandas", version = "3.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pyarrow" },
     { name = "torch" },
+    { name = "typing-extensions" },
 ]
 
 [package.dev-dependencies]
@@ -75,6 +76,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.2.0" },
     { name = "pyarrow", specifier = ">=13.0.0" },
     { name = "torch", specifier = ">=2.9.0,<2.10.0" },
+    { name = "typing-extensions", specifier = ">=4.5" },
 ]
 
 [package.metadata.requires-dev]

@@ -30,6 +30,7 @@ dependencies = [
     "pyarrow>=13.0.0",
     "torch>=2.9.0,<2.10.0",
     "numpy>=2.0.0",
+    "typing-extensions>=4.5",
 ]
 
 [project.urls]

@@ -19,7 +19,9 @@ from __future__ import annotations
 import random
 import string
 import uuid
-from typing import Literal, assert_never, get_args
+from typing import Literal, get_args
+
+from typing_extensions import assert_never
 
 PkType = Literal["dxid", "int", "uuid"]
 PK_TYPES: tuple[str, ...] = get_args(PkType)
