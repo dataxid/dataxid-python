@@ -1,5 +1,5 @@
 """
-Dataxid SDK — Quickstart
+DataXID SDK — Quickstart
 
 Demonstrates:
 1. synthesize()     — one-liner, simplest usage
