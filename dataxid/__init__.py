@@ -21,6 +21,7 @@ from __future__ import annotations
 
 __version__ = "0.3.0"
 
+import dataclasses
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -162,7 +163,7 @@ def synthesize(
         elif isinstance(config, dict):
             config.setdefault("seed", seed_explicit)
         elif isinstance(config, ModelConfig) and config.seed is None:
-            config.seed = seed_explicit
+            config = dataclasses.replace(config, seed=seed_explicit)
 
     model = Model.create(
         data=data,
