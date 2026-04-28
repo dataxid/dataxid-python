@@ -554,6 +554,41 @@ class Model:
             rare_strategy, synthetic, "rare_strategy", None
         )
 
+        if (
+            not isinstance(diversity_effective, (int, float))
+            or isinstance(diversity_effective, bool)
+            or diversity_effective <= 0
+        ):
+            raise InvalidRequestError(
+                f"diversity must be > 0, got {diversity_effective!r}",
+                param="diversity",
+            )
+        if (
+            not isinstance(rare_cutoff_effective, (int, float))
+            or isinstance(rare_cutoff_effective, bool)
+            or not (0 < rare_cutoff_effective <= 1.0)
+        ):
+            raise InvalidRequestError(
+                f"rare_cutoff must be in (0, 1], got {rare_cutoff_effective!r}",
+                param="rare_cutoff",
+            )
+        if (
+            rare_strategy_effective is not None
+            and rare_strategy_effective not in _RARE_STRATEGY_VALUES
+        ):
+            raise InvalidRequestError(
+                f"rare_strategy must be one of {_RARE_STRATEGY_VALUES}, "
+                f"got {rare_strategy_effective!r}",
+                param="rare_strategy",
+            )
+        if seed_effective is not None and (
+            not isinstance(seed_effective, int) or isinstance(seed_effective, bool)
+        ):
+            raise InvalidRequestError(
+                f"seed must be an integer or None, got {seed_effective!r}",
+                param="seed",
+            )
+
         return self._generate_core(
             n_samples=n_effective,
             conditions=conditions,
@@ -584,25 +619,15 @@ class Model:
 
         The ``imputation`` argument is only set by :meth:`impute` — public
         callers should go through :meth:`generate` instead.
+
+        Invariant (enforced by every public caller):
+            * ``diversity > 0``
+            * ``0 < rare_cutoff <= 1``
+            * ``rare_strategy`` is one of ``_RARE_STRATEGY_VALUES`` or ``None``
+            * ``seed`` is an ``int`` or ``None``
         """
-        if diversity <= 0:
-            raise InvalidRequestError(
-                f"diversity must be > 0, got {diversity}",
-                param="diversity",
-            )
-        if not (0 < rare_cutoff <= 1.0):
-            raise InvalidRequestError(
-                f"rare_cutoff must be in (0, 1], got {rare_cutoff}",
-                param="rare_cutoff",
-            )
         if rare_strategy is None:
             rare_strategy = self._config.privacy.rare_strategy
-        if rare_strategy not in _RARE_STRATEGY_VALUES:
-            raise InvalidRequestError(
-                f"rare_strategy must be one of {_RARE_STRATEGY_VALUES}, "
-                f"got {rare_strategy!r}",
-                param="rare_strategy",
-            )
 
         ctx = parent if parent is not None else self._parent
 
@@ -1007,6 +1032,43 @@ class Model:
                 if field_name not in kwargs:
                     kwargs[field_name] = getattr(synthetic, field_name)
                 # else: explicit kwarg wins over preset
+
+        if "diversity" in kwargs:
+            div = kwargs["diversity"]
+            if (
+                not isinstance(div, (int, float))
+                or isinstance(div, bool)
+                or div <= 0
+            ):
+                raise InvalidRequestError(
+                    f"diversity must be > 0, got {div!r}", param="diversity"
+                )
+        if "rare_cutoff" in kwargs:
+            rc = kwargs["rare_cutoff"]
+            if (
+                not isinstance(rc, (int, float))
+                or isinstance(rc, bool)
+                or not (0 < rc <= 1.0)
+            ):
+                raise InvalidRequestError(
+                    f"rare_cutoff must be in (0, 1], got {rc!r}",
+                    param="rare_cutoff",
+                )
+        if kwargs.get("rare_strategy") is not None and (
+            kwargs["rare_strategy"] not in _RARE_STRATEGY_VALUES
+        ):
+            raise InvalidRequestError(
+                f"rare_strategy must be one of {_RARE_STRATEGY_VALUES}, "
+                f"got {kwargs['rare_strategy']!r}",
+                param="rare_strategy",
+            )
+        if kwargs.get("seed") is not None and (
+            not isinstance(kwargs["seed"], int) or isinstance(kwargs["seed"], bool)
+        ):
+            raise InvalidRequestError(
+                f"seed must be an integer or None, got {kwargs['seed']!r}",
+                param="seed",
+            )
 
         def _single_draw() -> pd.DataFrame:
             return self._generate_core(
