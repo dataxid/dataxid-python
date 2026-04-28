@@ -90,6 +90,48 @@ _ERROR_MAP = {
 }
 
 
+_LOCALHOST_HOSTS: tuple[str, ...] = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
+def _validate_base_url(base_url: str) -> None:
+    """Reject non-HTTPS base URLs to prevent plaintext API-key exposure.
+
+    HTTP is allowed only for the loopback hosts listed in
+    :data:`_LOCALHOST_HOSTS` so local development stays unaffected.
+    """
+    stripped = base_url.strip()
+    if not stripped:
+        raise InvalidRequestError(
+            "base_url must be a non-empty string",
+            param="base_url",
+        )
+    if "://" not in stripped:
+        raise InvalidRequestError(
+            f"base_url must start with https:// (or http:// for localhost), "
+            f"got {base_url!r}",
+            param="base_url",
+        )
+    scheme, _, rest = stripped.partition("://")
+    scheme = scheme.lower()
+    host = rest.split("/", 1)[0].split(":", 1)[0].lower()
+    if scheme == "https":
+        return
+    if scheme == "http" and host in _LOCALHOST_HOSTS:
+        return
+    if scheme == "http":
+        raise InvalidRequestError(
+            f"base_url must use https:// for non-localhost endpoints, got "
+            f"{base_url!r} — sending API requests over HTTP would expose "
+            f"your API key in plaintext.",
+            param="base_url",
+        )
+    raise InvalidRequestError(
+        f"base_url scheme must be https:// (or http:// for localhost), "
+        f"got {scheme!r}://",
+        param="base_url",
+    )
+
+
 class DataxidClient:
     """Low-level HTTP client. Used internally by Model and synthesize()."""
 
@@ -99,6 +141,28 @@ class DataxidClient:
         base_url: str | None = None,
         timeout: float | httpx.Timeout = _DEFAULT_TIMEOUT,
     ):
+        if api_key is not None and not isinstance(api_key, str):
+            raise InvalidRequestError(
+                f"api_key must be a string or None, got {type(api_key).__name__}",
+                param="api_key",
+            )
+        if base_url is not None:
+            if not isinstance(base_url, str):
+                raise InvalidRequestError(
+                    f"base_url must be a string or None, got "
+                    f"{type(base_url).__name__}",
+                    param="base_url",
+                )
+            _validate_base_url(base_url)
+        if not isinstance(timeout, (int, float, httpx.Timeout)) or isinstance(
+            timeout, bool
+        ):
+            raise InvalidRequestError(
+                f"timeout must be a number or httpx.Timeout, got "
+                f"{type(timeout).__name__}",
+                param="timeout",
+            )
+
         self._api_key = api_key
         self._base_url = base_url
         self._timeout = timeout
@@ -115,7 +179,9 @@ class DataxidClient:
 
     @property
     def base_url(self) -> str:
-        return self._base_url or dataxid.base_url
+        url = self._base_url or dataxid.base_url
+        _validate_base_url(url)
+        return url
 
     def post(
         self, path: str, json: dict[str, Any] | None = None, idempotent: bool = True,

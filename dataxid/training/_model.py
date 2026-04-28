@@ -317,7 +317,47 @@ class Model:
 
         Returns:
             Trained Model ready for generate()
+
+        Raises:
+            InvalidRequestError: If any user input fails validation.
+                Inherits from :class:`ValueError`.
         """
+        if not isinstance(data, pd.DataFrame):
+            raise InvalidRequestError(
+                f"data must be a pandas DataFrame, got {type(data).__name__}",
+                param="data",
+            )
+        if n_samples is not None and (
+            not isinstance(n_samples, int)
+            or isinstance(n_samples, bool)
+            or n_samples <= 0
+        ):
+            raise InvalidRequestError(
+                f"n_samples must be a positive integer or None, got {n_samples!r}",
+                param="n_samples",
+            )
+        if parent is not None and not isinstance(parent, pd.DataFrame):
+            raise InvalidRequestError(
+                f"parent must be a pandas DataFrame or None, got {type(parent).__name__}",
+                param="parent",
+            )
+        if parent_encoding_types is not None and not isinstance(parent_encoding_types, dict):
+            raise InvalidRequestError(
+                f"parent_encoding_types must be a dict or None, got "
+                f"{type(parent_encoding_types).__name__}",
+                param="parent_encoding_types",
+            )
+        if foreign_key is not None and not isinstance(foreign_key, str):
+            raise InvalidRequestError(
+                f"foreign_key must be a string or None, got {type(foreign_key).__name__}",
+                param="foreign_key",
+            )
+        if parent_key is not None and not isinstance(parent_key, str):
+            raise InvalidRequestError(
+                f"parent_key must be a string or None, got {type(parent_key).__name__}",
+                param="parent_key",
+            )
+
         config = _resolve_config(config)
 
         if parent is not None and foreign_key is not None and parent_key is None:
@@ -478,6 +518,27 @@ class Model:
             For filling missing values, use :meth:`impute` — do not attempt
             to emulate imputation through ``generate`` + ``conditions``.
         """
+        if n_samples is not None and (
+            not isinstance(n_samples, int)
+            or isinstance(n_samples, bool)
+            or n_samples <= 0
+        ):
+            raise InvalidRequestError(
+                f"n_samples must be a positive integer or None, got {n_samples!r}",
+                param="n_samples",
+            )
+        if conditions is not None and not isinstance(conditions, pd.DataFrame):
+            raise InvalidRequestError(
+                f"conditions must be a pandas DataFrame or None, got "
+                f"{type(conditions).__name__}",
+                param="conditions",
+            )
+        if parent is not None and not isinstance(parent, pd.DataFrame):
+            raise InvalidRequestError(
+                f"parent must be a pandas DataFrame or None, got "
+                f"{type(parent).__name__}",
+                param="parent",
+            )
         if synthetic is not None and not isinstance(synthetic, Synthetic):
             raise InvalidRequestError(
                 "synthetic must be a Synthetic instance or None, got "
@@ -892,7 +953,32 @@ class Model:
             df_dirty = df.copy()
             df_dirty.loc[0:10, "age"] = None
             df_clean = model.impute(df_dirty)
+
+        Raises:
+            InvalidRequestError: If any user input fails validation.
+                Inherits from :class:`ValueError`.
         """
+        if not isinstance(X, pd.DataFrame):
+            raise InvalidRequestError(
+                f"X must be a pandas DataFrame, got {type(X).__name__}",
+                param="X",
+            )
+        if parent is not None and not isinstance(parent, pd.DataFrame):
+            raise InvalidRequestError(
+                f"parent must be a pandas DataFrame or None, got "
+                f"{type(parent).__name__}",
+                param="parent",
+            )
+        if (
+            not isinstance(trials, int)
+            or isinstance(trials, bool)
+            or trials <= 0
+        ):
+            raise InvalidRequestError(
+                f"trials must be a positive integer, got {trials!r}",
+                param="trials",
+            )
+
         X_df = X.copy().reset_index(drop=True)
 
         fk = self._encoder._foreign_key
