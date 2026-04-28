@@ -107,6 +107,48 @@ class TestInvalidRequestError:
         assert str(exc) == "bad"
 
 
+class TestInvalidRequestErrorContract:
+    """``InvalidRequestError`` multi-inherits from ``DataxidError`` and
+    ``ValueError`` so callers can use either ``except DataxidError`` for
+    SDK-wide handling or the Python-idiomatic ``except ValueError`` for
+    validation failures.
+    """
+
+    def test_is_a_dataxid_error(self) -> None:
+        assert issubclass(InvalidRequestError, DataxidError)
+
+    def test_is_a_value_error(self) -> None:
+        """Multi-inheritance from ``ValueError`` keeps ``except ValueError``
+        working for callers writing Python-idiomatic validation handlers."""
+        assert issubclass(InvalidRequestError, ValueError)
+
+    def test_can_be_caught_as_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            raise InvalidRequestError("bad", param="x")
+
+    def test_can_be_caught_as_dataxid_error(self) -> None:
+        with pytest.raises(DataxidError):
+            raise InvalidRequestError("bad", param="x")
+
+    def test_domain_object_rejection_is_an_invalid_request_error(self) -> None:
+        """Domain object constructors (Bias, Synthetic, Distribution,
+        Privacy) raise ``InvalidRequestError`` with a populated ``param``
+        — the SDK's single contract for "bad caller input"."""
+        from dataxid import Bias
+
+        with pytest.raises(InvalidRequestError) as exc_info:
+            Bias(target="", sensitive=["g"])
+        assert exc_info.value.param == "target"
+
+    def test_domain_object_rejection_is_still_a_value_error(self) -> None:
+        """Backwards-compatibility: callers using ``except ValueError``
+        continue to catch validation failures from domain constructors."""
+        from dataxid import Bias
+
+        with pytest.raises(ValueError):
+            Bias(target="", sensitive=["g"])
+
+
 class TestRateLimitError:
     """``RateLimitError.retry_after`` carries the server's back-off hint."""
 

@@ -61,17 +61,18 @@ def _normalize_distribution(distribution: Distribution | None) -> dict | None:
     """Normalize a :class:`Distribution` input into its plain-dict form.
 
     Accepts only :class:`Distribution` instances (or ``None``). Dict inputs
-    are rejected with :class:`TypeError`; use ``Distribution(column=..., ...)``
-    instead.
+    are rejected with :class:`InvalidRequestError`; use
+    ``Distribution(column=..., ...)`` instead.
     """
     if distribution is None:
         return None
     if isinstance(distribution, Distribution):
         return asdict(distribution)
-    raise TypeError(
+    raise InvalidRequestError(
         "distribution must be a Distribution instance or None, got "
         f"{type(distribution).__name__}. Use dataxid.Distribution(...) — "
-        "dict inputs are no longer supported as of v0.3.0."
+        "dict inputs are no longer supported as of v0.3.0.",
+        param="distribution",
     )
 
 
@@ -101,16 +102,17 @@ def _merge_n(n_samples: int | None, synthetic: Synthetic | None) -> int | None:
     - Both unset → ``None`` (caller / downstream decides).
     - Only one set → that value.
     - Both set and equal → that value.
-    - Both set but conflicting → :class:`ValueError`.
+    - Both set but conflicting → :class:`InvalidRequestError`.
     """
     preset_n = synthetic.n if synthetic is not None else None
     if n_samples is None:
         return preset_n
     if preset_n is None or preset_n == n_samples:
         return n_samples
-    raise ValueError(
+    raise InvalidRequestError(
         f"n_samples ({n_samples}) conflicts with synthetic.n ({preset_n}). "
-        "Pass only one."
+        "Pass only one.",
+        param="n_samples",
     )
 
 
@@ -118,17 +120,18 @@ def _normalize_bias(bias: Bias | None) -> dict | None:
     """Normalize a :class:`Bias` input into its plain-dict form.
 
     Accepts only :class:`Bias` instances (or ``None``). Dict inputs are
-    rejected with :class:`TypeError`; use ``Bias(target=..., sensitive=...)``
-    instead.
+    rejected with :class:`InvalidRequestError`; use
+    ``Bias(target=..., sensitive=...)`` instead.
     """
     if bias is None:
         return None
     if isinstance(bias, Bias):
         return asdict(bias)
-    raise TypeError(
+    raise InvalidRequestError(
         "bias must be a Bias instance or None, got "
         f"{type(bias).__name__}. Use dataxid.Bias(...) — "
-        "dict inputs are no longer supported as of v0.3.0."
+        "dict inputs are no longer supported as of v0.3.0.",
+        param="bias",
     )
 
 
@@ -179,7 +182,10 @@ def _resolve_pick(
     if callable(pick) and not isinstance(pick, str):
         return pick, False
     if pick not in _PICK_FN_MAP:
-        raise ValueError(f"Unknown pick '{pick}'. Choose from {list(_PICK_FN_MAP)}")
+        raise InvalidRequestError(
+            f"Unknown pick {pick!r}. Choose from {list(_PICK_FN_MAP)}",
+            param="pick",
+        )
     return _PICK_FN_MAP[pick], pick == "all"
 
 
@@ -459,22 +465,24 @@ class Model:
             DataFrame with synthetic data
 
         Raises:
-            ValueError: If both ``n_samples`` and ``conditions`` are provided and
-                their sizes disagree, if ``synthetic.n`` conflicts with
-                ``n_samples``, if ``bias`` is used in sequential mode,
-                or if ``diversity``/``rare_cutoff``/``rare_strategy``
-                are out of range.
-            TypeError: If ``synthetic`` is provided but is not a
-                :class:`Synthetic` instance.
+            InvalidRequestError: For any user-input error, including: both
+                ``n_samples`` and ``conditions`` are provided with
+                disagreeing sizes; ``synthetic.n`` conflicts with
+                ``n_samples``; ``bias`` is used in sequential mode;
+                ``diversity`` / ``rare_cutoff`` / ``rare_strategy`` are
+                out of range; ``synthetic`` is not a :class:`Synthetic`
+                instance. Inherits from :class:`ValueError` for backward
+                compatibility.
 
         Note:
             For filling missing values, use :meth:`impute` — do not attempt
             to emulate imputation through ``generate`` + ``conditions``.
         """
         if synthetic is not None and not isinstance(synthetic, Synthetic):
-            raise TypeError(
+            raise InvalidRequestError(
                 "synthetic must be a Synthetic instance or None, got "
-                f"{type(synthetic).__name__}. Use dataxid.Synthetic(...)."
+                f"{type(synthetic).__name__}. Use dataxid.Synthetic(...).",
+                param="synthetic",
             )
 
         n_effective = _merge_n(n_samples, synthetic)
@@ -517,23 +525,32 @@ class Model:
         callers should go through :meth:`generate` instead.
         """
         if diversity <= 0:
-            raise ValueError(f"diversity must be > 0, got {diversity}")
+            raise InvalidRequestError(
+                f"diversity must be > 0, got {diversity}",
+                param="diversity",
+            )
         if not (0 < rare_cutoff <= 1.0):
-            raise ValueError(f"rare_cutoff must be in (0, 1], got {rare_cutoff}")
+            raise InvalidRequestError(
+                f"rare_cutoff must be in (0, 1], got {rare_cutoff}",
+                param="rare_cutoff",
+            )
         if rare_strategy is None:
             rare_strategy = self._config.privacy.rare_strategy
         if rare_strategy not in _RARE_STRATEGY_VALUES:
-            raise ValueError(
-                f"rare_strategy must be one of "
-                f"{_RARE_STRATEGY_VALUES}, "
-                f"got {rare_strategy!r}"
+            raise InvalidRequestError(
+                f"rare_strategy must be one of {_RARE_STRATEGY_VALUES}, "
+                f"got {rare_strategy!r}",
+                param="rare_strategy",
             )
 
         ctx = parent if parent is not None else self._parent
 
         if self._encoder.is_sequential:
             if bias:
-                raise ValueError("bias is not supported in sequential mode")
+                raise InvalidRequestError(
+                    "bias is not supported in sequential mode",
+                    param="bias",
+                )
             return self._generate_sequential(
                 n_samples=n_samples, conditions=conditions, parent=ctx,
                 seed=seed, distribution=distribution, imputation=imputation,
@@ -543,10 +560,11 @@ class Model:
 
         # flat mode: conditions row count = output row count
         if conditions is not None and n_samples is not None and n_samples != len(conditions):
-            raise ValueError(
+            raise InvalidRequestError(
                 f"n_samples ({n_samples}) conflicts with conditions length "
                 f"({len(conditions)}). When conditions is provided, omit n_samples "
-                f"or set it to len(conditions)."
+                f"or set it to len(conditions).",
+                param="n_samples",
             )
 
         n = (
@@ -712,9 +730,10 @@ class Model:
         fixed_values = None
         if conditions is not None and column_stats and context_key:
             if context_key not in conditions.columns:
-                raise ValueError(
+                raise InvalidRequestError(
                     f"Sequential conditions must contain the foreign key column "
-                    f"'{context_key}'. Got columns: {list(conditions.columns)}"
+                    f"'{context_key}'. Got columns: {list(conditions.columns)}",
+                    param="conditions",
                 )
             pk_col = self._encoder._parent_key
             training_parent = self._parent
@@ -888,9 +907,10 @@ class Model:
 
         synthetic = kwargs.pop("synthetic", None)
         if synthetic is not None and not isinstance(synthetic, Synthetic):
-            raise TypeError(
+            raise InvalidRequestError(
                 "synthetic must be a Synthetic instance or None, got "
-                f"{type(synthetic).__name__}. Use dataxid.Synthetic(...)."
+                f"{type(synthetic).__name__}. Use dataxid.Synthetic(...).",
+                param="synthetic",
             )
         if synthetic is not None:
             if "n_samples" in kwargs:

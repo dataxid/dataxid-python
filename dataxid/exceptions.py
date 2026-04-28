@@ -18,8 +18,14 @@ class AuthenticationError(DataxidError):
     pass
 
 
-class InvalidRequestError(DataxidError):
-    """Bad request parameters."""
+class InvalidRequestError(DataxidError, ValueError):
+    """Bad request parameters.
+
+    Multi-inherits from :class:`ValueError` so that callers using the
+    Python-idiomatic ``except ValueError`` continue to catch validation
+    failures, while ``except DataxidError`` remains the SDK-wide handler.
+    The ``param`` attribute names the offending field.
+    """
     def __init__(self, message: str, param: str | None = None, **kwargs):
         self.param = param
         super().__init__(message, **kwargs)

@@ -21,6 +21,7 @@ import pytest
 
 import dataxid
 from dataxid import Bias, Distribution, ModelConfig, Privacy, Synthetic
+from dataxid.exceptions import InvalidRequestError
 from dataxid.training._config import _resolve_config
 
 
@@ -274,21 +275,32 @@ class TestResolveConfig:
     @pytest.mark.parametrize("bad_privacy", ["a string", 42, 3.14, []])
     def test_dict_privacy_wrong_type_raises(self, bad_privacy: object) -> None:
         """Anything that is not Privacy/dict/None is rejected up-front."""
-        with pytest.raises(TypeError, match="config\\['privacy'\\]"):
+        with pytest.raises(InvalidRequestError, match="config\\['privacy'\\]") as exc_info:
             _resolve_config({"privacy": bad_privacy})
+        assert exc_info.value.param == "config"
 
     def test_model_config_returned_as_is(self) -> None:
         cfg_in = ModelConfig(embedding_dim=128, model_size="large")
         assert _resolve_config(cfg_in) is cfg_in
 
     @pytest.mark.parametrize("bad_input", ["embedding_dim=128", 42, 3.14, []])
-    def test_wrong_type_raises_type_error(self, bad_input: object) -> None:
-        with pytest.raises(TypeError, match="ModelConfig"):
+    def test_wrong_type_raises(self, bad_input: object) -> None:
+        with pytest.raises(InvalidRequestError, match="ModelConfig") as exc_info:
             _resolve_config(bad_input)  # type: ignore[arg-type]
+        assert exc_info.value.param == "config"
 
-    def test_unknown_dict_key_raises_type_error(self) -> None:
-        with pytest.raises(TypeError):
+    def test_unknown_dict_key_raises(self) -> None:
+        """Unknown keys in a dict-config surface as InvalidRequestError so
+        callers see a consistent SDK error type instead of a raw ``TypeError``
+        leaking out of ``ModelConfig.__init__``."""
+        with pytest.raises(InvalidRequestError, match="unknown field") as exc_info:
             _resolve_config({"unknown_key": 99})
+        assert exc_info.value.param == "config"
+
+    def test_unknown_privacy_dict_key_raises(self) -> None:
+        with pytest.raises(InvalidRequestError, match="config\\['privacy'\\]") as exc_info:
+            _resolve_config({"privacy": {"unknown_privacy_key": True}})
+        assert exc_info.value.param == "config"
 
 
 class TestTopLevelImport:
@@ -376,26 +388,26 @@ class TestDistributionDataclass:
             Distribution(**kwargs)
 
     @pytest.mark.parametrize(
-        "bad_key,error_type,error_match",
+        "bad_key,error_match",
         [
-            (25, TypeError, "must be strings, got int"),
-            (None, TypeError, "must be strings, got NoneType"),
-            (("a",), TypeError, "must be strings, got tuple"),
-            ("", ValueError, "non-empty / non-whitespace"),
-            ("   ", ValueError, "non-empty / non-whitespace"),
+            (25, "must be strings, got int"),
+            (None, "must be strings, got NoneType"),
+            (("a",), "must be strings, got tuple"),
+            ("", "non-empty / non-whitespace"),
+            ("   ", "non-empty / non-whitespace"),
         ],
     )
     def test_non_string_or_blank_keys_rejected(
         self,
         bad_key: object,
-        error_type: type[Exception],
         error_match: str,
     ) -> None:
         """Numeric or blank ``probabilities`` keys are rejected explicitly so
         the wire format stays consistent — server-side codes lookup uses
         ``isinstance(key, str)``, and a numeric key would silently no-op."""
-        with pytest.raises(error_type, match=error_match):
+        with pytest.raises(InvalidRequestError, match=error_match) as exc_info:
             Distribution(column="age", probabilities={bad_key: 1.0})  # type: ignore[dict-item]
+        assert exc_info.value.param == "probabilities"
 
 
 class TestBiasDataclass:

@@ -332,8 +332,9 @@ class TestGenerate:
              patch("dataxid.training._model.decode_columns", side_effect=_flat_decode):
             mock_req.side_effect = [_make_create_response()]
             model = Model.create(data=sample_df, config=_DEFAULT_CONFIG)
-            with pytest.raises(TypeError, match="Distribution instance"):
+            with pytest.raises(InvalidRequestError, match="Distribution instance") as exc_info:
                 model.generate(distribution={"column": "city", "probabilities": {"A": 1.0}})
+            assert exc_info.value.param == "distribution"
 
     def test_distribution_sets_fixed_probs_and_column_order(
         self, sample_df: pd.DataFrame, mock_train_frozen: None
@@ -1152,8 +1153,11 @@ class TestGenerateWithSynthetic:
     ) -> None:
         with patch.object(DataxidClient, "_request", return_value=_make_create_response()):
             model = Model.create(data=sample_df, config=_DEFAULT_CONFIG)
-        with pytest.raises(TypeError, match="synthetic must be a Synthetic instance"):
+        with pytest.raises(
+            InvalidRequestError, match="synthetic must be a Synthetic instance"
+        ) as exc_info:
             model.generate(synthetic={"diversity": 0.5})  # type: ignore[arg-type]
+        assert exc_info.value.param == "synthetic"
 
 
 class TestImpute:
