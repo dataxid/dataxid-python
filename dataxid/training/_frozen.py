@@ -125,18 +125,20 @@ def _process_async_result(model: Model, result: dict, max_epochs: int) -> None: 
     model.val_losses = []
     model.stopped_early = result.get("early_stopped", False)
 
-    final_train = result.get("train_loss") or 0
-    final_val = result.get("val_loss") or 0
+    final_train = result.get("train_loss")
+    final_val = result.get("val_loss")
 
-    if final_train:
+    if final_train is not None:
         model.train_losses.append(final_train)
-    if final_val:
+    if final_val is not None:
         model.val_losses.append(final_val)
 
     logger.info(
-        "Training completed: %d epochs, train_loss=%.4f, val_loss=%.4f, "
+        "Training completed: %d epochs, train_loss=%s, val_loss=%s, "
         "early_stopped=%s, duration=%.1fs",
-        result.get("epochs", 0), final_train, final_val,
+        result.get("epochs", 0),
+        f"{final_train:.4f}" if final_train is not None else "n/a",
+        f"{final_val:.4f}" if final_val is not None else "n/a",
         model.stopped_early, result.get("duration_seconds", 0),
     )
     model.status = "ready"
@@ -158,16 +160,21 @@ def _process_sync_result(model: Model, data: dict, max_epochs: int) -> None:
 
         ckpt = " *" if e.get("is_checkpoint") else ""
         logger.info(
-            "Epoch %s/%d: train=%.4f, val=%.4f, lr=%.6f%s",
+            "Epoch %s/%d: train=%s, val=%s, lr=%.6f%s",
             e.get("epoch", "?"), max_epochs,
-            t_loss or 0, v_loss or 0, e.get("learning_rate", 0), ckpt,
+            f"{t_loss:.4f}" if t_loss is not None else "n/a",
+            f"{v_loss:.4f}" if v_loss is not None else "n/a",
+            e.get("learning_rate", 0), ckpt,
         )
 
-    final_train = data.get("train_loss") or 0
-    final_val = data.get("val_loss") or 0
+    final_train = data.get("train_loss")
+    final_val = data.get("val_loss")
     logger.info(
-        "Training completed: %d epochs, train_loss=%.4f, val_loss=%.4f, "
+        "Training completed: %d epochs, train_loss=%s, val_loss=%s, "
         "early_stopped=%s",
-        data.get("epochs", 0), final_train, final_val, model.stopped_early,
+        data.get("epochs", 0),
+        f"{final_train:.4f}" if final_train is not None else "n/a",
+        f"{final_val:.4f}" if final_val is not None else "n/a",
+        model.stopped_early,
     )
     model.status = "ready"

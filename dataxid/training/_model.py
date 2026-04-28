@@ -272,6 +272,16 @@ class Model:
         self._best_encoder_state: bytes | None = None
         self._encoder_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
 
+    @property
+    def is_sequential(self) -> bool:
+        """Whether this model was trained on sequential (time-ordered) data."""
+        return self._encoder.is_sequential
+
+    @property
+    def has_context(self) -> bool:
+        """Whether this model uses a parent (context) table."""
+        return self._encoder.has_context
+
     @classmethod
     def create(
         cls,

@@ -73,6 +73,11 @@ class Encoder:
         self._parent_key: str | None = None
         self._seq_data: dict[str, list] | None = None
 
+    @property
+    def protect_rare_enabled(self) -> bool:
+        """Whether rare-category protection is active for this encoder."""
+        return self._protect_rare
+
     def analyze(
         self,
         df: pd.DataFrame,

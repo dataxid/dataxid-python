@@ -10,10 +10,12 @@ Plain dicts are accepted for backwards-compatible ergonomics; see
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
 RareStrategy = Literal["mask", "sample"]
+_RARE_STRATEGIES: tuple[str, ...] = ("mask", "sample")
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,11 @@ class Synthetic:
             raise ValueError(
                 f"Synthetic.rare_cutoff must be in (0, 1], got {self.rare_cutoff!r}"
             )
+        if self.rare_strategy is not None and self.rare_strategy not in _RARE_STRATEGIES:
+            raise ValueError(
+                f"Synthetic.rare_strategy must be 'mask', 'sample', or None, "
+                f"got {self.rare_strategy!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -110,13 +117,13 @@ class Bias:
     sensitive: list[str]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target, str) or not self.target:
+        if not isinstance(self.target, str) or not self.target.strip():
             raise ValueError(
                 f"Bias.target must be a non-empty string, got {self.target!r}"
             )
         if not self.sensitive:
             raise ValueError("Bias.sensitive must be a non-empty list")
-        if any(not isinstance(s, str) or not s for s in self.sensitive):
+        if any(not isinstance(s, str) or not s.strip() for s in self.sensitive):
             raise ValueError(
                 "Bias.sensitive entries must be non-empty strings"
             )
@@ -159,16 +166,40 @@ class Distribution:
     probabilities: dict[str, float]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.column, str) or not self.column:
+        if not isinstance(self.column, str) or not self.column.strip():
             raise ValueError(
                 f"Distribution.column must be a non-empty string, got {self.column!r}"
             )
         if not self.probabilities:
             raise ValueError("Distribution.probabilities must be non-empty")
-        if any(p < 0 for p in self.probabilities.values()):
-            raise ValueError(
-                "Distribution.probabilities must be non-negative"
-            )
+        for key, value in self.probabilities.items():
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"Distribution.probabilities keys must be strings, got "
+                    f"{type(key).__name__} ({key!r}). Numeric category values "
+                    f"must be passed as their string representation, e.g. "
+                    f"{{'25': 0.5}} not {{25: 0.5}}."
+                )
+            if not key.strip():
+                raise ValueError(
+                    "Distribution.probabilities keys must be non-empty / "
+                    f"non-whitespace strings, got {key!r}"
+                )
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(
+                    f"Distribution.probabilities[{key!r}] must be a real number, "
+                    f"got {value!r}"
+                )
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(
+                    f"Distribution.probabilities[{key!r}] must be finite, "
+                    f"got {value!r}"
+                )
+            if value < 0:
+                raise ValueError(
+                    f"Distribution.probabilities[{key!r}] must be non-negative, "
+                    f"got {value!r}"
+                )
 
 
 @dataclass
@@ -218,6 +249,21 @@ class Privacy:
     enabled: bool = False
     noise: float = 0.1
 
+    def __post_init__(self) -> None:
+        if self.rare_strategy not in _RARE_STRATEGIES:
+            raise ValueError(
+                f"Privacy.rare_strategy must be 'mask' or 'sample', "
+                f"got {self.rare_strategy!r}"
+            )
+        if not isinstance(self.noise, (int, float)) or isinstance(self.noise, bool):
+            raise ValueError(
+                f"Privacy.noise must be a real number, got {self.noise!r}"
+            )
+        if math.isnan(self.noise) or math.isinf(self.noise) or self.noise < 0:
+            raise ValueError(
+                f"Privacy.noise must be a non-negative finite number, got {self.noise!r}"
+            )
+
 
 @dataclass
 class ModelConfig:
@@ -255,6 +301,84 @@ class ModelConfig:
     seed: int | None = None
     timeout: float = 14400.0
 
+    def __post_init__(self) -> None:
+        self._check_positive_int("embedding_dim", self.embedding_dim)
+        self._check_positive_int("batch_size", self.batch_size)
+        self._check_positive_int("max_epochs", self.max_epochs)
+        self._check_positive_int("accumulation_steps", self.accumulation_steps)
+        self._check_non_negative_int("early_stop_patience", self.early_stop_patience)
+        self._check_unit_interval_open("val_split", self.val_split)
+        self._check_unit_interval_closed_left("label_smoothing", self.label_smoothing)
+        self._check_unit_interval_closed_left("embedding_dropout", self.embedding_dropout)
+        self._check_non_negative_finite("time_limit_seconds", self.time_limit_seconds)
+        self._check_positive_finite("timeout", self.timeout)
+        if self.learning_rate is not None:
+            self._check_positive_finite("learning_rate", self.learning_rate)
+
+    @staticmethod
+    def _check_positive_int(name: str, value: object) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(
+                f"ModelConfig.{name} must be a positive integer, got {value!r}"
+            )
+
+    @staticmethod
+    def _check_non_negative_int(name: str, value: object) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(
+                f"ModelConfig.{name} must be a non-negative integer, got {value!r}"
+            )
+
+    @staticmethod
+    def _check_unit_interval_open(name: str, value: object) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or math.isnan(value)
+            or not (0 < value < 1)
+        ):
+            raise ValueError(
+                f"ModelConfig.{name} must be in (0, 1), got {value!r}"
+            )
+
+    @staticmethod
+    def _check_unit_interval_closed_left(name: str, value: object) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or math.isnan(value)
+            or not (0 <= value < 1)
+        ):
+            raise ValueError(
+                f"ModelConfig.{name} must be in [0, 1), got {value!r}"
+            )
+
+    @staticmethod
+    def _check_non_negative_finite(name: str, value: object) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or math.isnan(value)
+            or math.isinf(value)
+            or value < 0
+        ):
+            raise ValueError(
+                f"ModelConfig.{name} must be a non-negative finite number, got {value!r}"
+            )
+
+    @staticmethod
+    def _check_positive_finite(name: str, value: object) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or math.isnan(value)
+            or math.isinf(value)
+            or value <= 0
+        ):
+            raise ValueError(
+                f"ModelConfig.{name} must be a positive finite number, got {value!r}"
+            )
+
     def to_dict(self) -> dict:
         """Serialize to a plain dict."""
         data = dict(self.__dict__)
@@ -276,11 +400,17 @@ def _resolve_config(config: dict | ModelConfig | None) -> ModelConfig:
         return config
     if isinstance(config, dict):
         data = dict(config)
-        privacy = data.get("privacy")
-        if isinstance(privacy, dict):
-            data["privacy"] = Privacy(**privacy)
-        elif privacy is None and "privacy" in data:
-            data["privacy"] = Privacy()
+        if "privacy" in data:
+            privacy = data["privacy"]
+            if privacy is None:
+                data["privacy"] = Privacy()
+            elif isinstance(privacy, dict):
+                data["privacy"] = Privacy(**privacy)
+            elif not isinstance(privacy, Privacy):
+                raise TypeError(
+                    f"config['privacy'] must be a Privacy instance, dict, or None, "
+                    f"got {type(privacy).__name__}"
+                )
         return ModelConfig(**data)
     raise TypeError(
         f"config must be a ModelConfig instance or dict, got {type(config).__name__}"

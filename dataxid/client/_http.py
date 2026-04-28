@@ -6,10 +6,12 @@ HTTP client for DataXID API.
 Handles auth, retry, timeout, idempotency keys, and structured error parsing.
 """
 
+import email.utils
 import os
 import random
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -31,6 +33,53 @@ _MAX_RETRIES = 3
 _RETRY_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _BACKOFF_BASE = 0.5
 _BACKOFF_MAX = 8.0
+
+# Upper bound for honoured ``Retry-After`` hints. A misconfigured or hostile
+# server cannot put the SDK to sleep for hours; longer hints fall back to
+# this cap so callers can still cancel within a reasonable window.
+_MAX_RETRY_AFTER_SECONDS = 3600.0
+
+
+def _parse_retry_after(raw: str | None) -> float | None:
+    """Parse a ``Retry-After`` header value into a delay in seconds.
+
+    Per :rfc:`9110#section-10.2.3` the header value is either ``delta-seconds``
+    (an integer number of seconds) or an ``HTTP-date``. We accept both forms
+    — plus a fractional-seconds variant some servers emit — and return
+    ``None`` for anything else, so callers fall back to exponential backoff.
+
+    Negative deltas, past dates, and values exceeding
+    :data:`_MAX_RETRY_AFTER_SECONDS` are normalised to keep the SDK
+    responsive even when the server returns a degenerate hint.
+    """
+    if not raw:
+        return None
+
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    try:
+        seconds: float | None = float(raw)
+    except ValueError:
+        seconds = _http_date_to_seconds(raw)
+
+    if seconds is None or seconds < 0:
+        return None
+    return min(seconds, _MAX_RETRY_AFTER_SECONDS)
+
+
+def _http_date_to_seconds(raw: str) -> float | None:
+    """Convert an RFC 1123 ``HTTP-date`` into seconds from "now"."""
+    try:
+        parsed = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (parsed - datetime.now(tz=timezone.utc)).total_seconds()
 
 _ERROR_MAP = {
     "authentication_error": AuthenticationError,
@@ -87,7 +136,7 @@ class DataxidClient:
         params: dict[str, Any] | None = None,
         idempotent: bool = False,
     ) -> dict | None:
-        url = f"{self.base_url}{path}"
+        url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -142,14 +191,11 @@ class DataxidClient:
     def _sleep_before_retry(
         attempt: int, response: httpx.Response | None = None,
     ) -> None:
-        retry_after = None
-        if response is not None:
-            raw = response.headers.get("Retry-After")
-            if raw:
-                try:
-                    retry_after = float(raw)
-                except ValueError:
-                    retry_after = None
+        retry_after = (
+            _parse_retry_after(response.headers.get("Retry-After"))
+            if response is not None
+            else None
+        )
 
         if retry_after is not None and retry_after > 0:
             delay = retry_after
@@ -186,8 +232,9 @@ class DataxidClient:
         if exc_class == InvalidRequestError:
             kwargs["param"] = error.get("param")
         elif exc_class == RateLimitError:
-            retry_after = response.headers.get("Retry-After")
-            kwargs["retry_after"] = float(retry_after) if retry_after else None
+            kwargs["retry_after"] = _parse_retry_after(
+                response.headers.get("Retry-After"),
+            )
         elif exc_class == QuotaExceededError:
             kwargs["usage"] = error.get("usage")
             kwargs["upgrade_url"] = error.get("upgrade_url")

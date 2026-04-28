@@ -40,6 +40,11 @@ def enable_logging(level: str = "info") -> None:
     Raises:
         ValueError: If *level* is not a valid Python log level name.
     """
+    if not isinstance(level, str):
+        raise ValueError(
+            f"Invalid log level: {level!r}. "
+            f"Use one of: debug, info, warning, error, critical."
+        )
     numeric = getattr(logging, level.upper(), None)
     if not isinstance(numeric, int):
         raise ValueError(
