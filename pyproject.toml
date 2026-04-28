@@ -61,7 +61,7 @@ packages = ["dataxid"]
 "dataxid/py.typed" = "dataxid/py.typed"
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py310"
 
 [tool.ruff.lint]
@@ -78,6 +78,13 @@ select = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["dataxid"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "ARG001",
+    "ARG002",
+    "ARG004",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
