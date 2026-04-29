@@ -88,10 +88,22 @@ class Table:
                     f"{list(self.data.columns)}.",
                     param="foreign_keys",
                 )
+            if fk_col == self.primary_key:
+                raise InvalidRequestError(
+                    f"Foreign key '{fk_col}' cannot also be the primary_key "
+                    f"of the same table.",
+                    param="foreign_keys",
+                )
             if not isinstance(parent_table, Table):
                 raise InvalidRequestError(
                     f"foreign_keys values must be Table instances, got "
                     f"{type(parent_table).__name__} for key '{fk_col}'.",
+                    param="foreign_keys",
+                )
+            if parent_table is self:
+                raise InvalidRequestError(
+                    f"Foreign key '{fk_col}' references the same Table "
+                    f"instance — self-references are not supported.",
                     param="foreign_keys",
                 )
             if parent_table.primary_key is None:
@@ -160,8 +172,27 @@ def _resolve_fk_targets(
 
 def _validate_tables(tables: dict[str, Table]) -> None:
     """Validate table definitions: FK targets exist, referenced tables have PK, no cycles."""
+    if not isinstance(tables, dict):
+        raise InvalidRequestError(
+            f"tables must be a dict mapping name to Table, got "
+            f"{type(tables).__name__}.",
+            param="tables",
+        )
     if not tables:
         raise InvalidRequestError("tables must contain at least one table.", param="tables")
+
+    for name, tbl in tables.items():
+        if not isinstance(name, str):
+            raise InvalidRequestError(
+                f"tables keys must be strings, got {type(name).__name__} ({name!r}).",
+                param="tables",
+            )
+        if not isinstance(tbl, Table):
+            raise InvalidRequestError(
+                f"tables[{name!r}] must be a Table instance, got "
+                f"{type(tbl).__name__}.",
+                param="tables",
+            )
 
     _resolve_fk_targets(tables)
 

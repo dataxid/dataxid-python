@@ -6,10 +6,12 @@ HTTP client for DataXID API.
 Handles auth, retry, timeout, idempotency keys, and structured error parsing.
 """
 
+import email.utils
 import os
 import random
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -32,6 +34,53 @@ _RETRY_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _BACKOFF_BASE = 0.5
 _BACKOFF_MAX = 8.0
 
+# Upper bound for honoured ``Retry-After`` hints. A misconfigured or hostile
+# server cannot put the SDK to sleep for hours; longer hints fall back to
+# this cap so callers can still cancel within a reasonable window.
+_MAX_RETRY_AFTER_SECONDS = 3600.0
+
+
+def _parse_retry_after(raw: str | None) -> float | None:
+    """Parse a ``Retry-After`` header value into a delay in seconds.
+
+    Per :rfc:`9110#section-10.2.3` the header value is either ``delta-seconds``
+    (an integer number of seconds) or an ``HTTP-date``. We accept both forms
+    — plus a fractional-seconds variant some servers emit — and return
+    ``None`` for anything else, so callers fall back to exponential backoff.
+
+    Negative deltas, past dates, and values exceeding
+    :data:`_MAX_RETRY_AFTER_SECONDS` are normalised to keep the SDK
+    responsive even when the server returns a degenerate hint.
+    """
+    if not raw:
+        return None
+
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    try:
+        seconds: float | None = float(raw)
+    except ValueError:
+        seconds = _http_date_to_seconds(raw)
+
+    if seconds is None or seconds < 0:
+        return None
+    return min(seconds, _MAX_RETRY_AFTER_SECONDS)
+
+
+def _http_date_to_seconds(raw: str) -> float | None:
+    """Convert an RFC 1123 ``HTTP-date`` into seconds from "now"."""
+    try:
+        parsed = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (parsed - datetime.now(tz=timezone.utc)).total_seconds()
+
 _ERROR_MAP = {
     "authentication_error": AuthenticationError,
     "invalid_request_error": InvalidRequestError,
@@ -39,6 +88,48 @@ _ERROR_MAP = {
     "quota_exceeded": QuotaExceededError,
     "rate_limit_error": RateLimitError,
 }
+
+
+_LOCALHOST_HOSTS: tuple[str, ...] = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
+def _validate_base_url(base_url: str) -> None:
+    """Reject non-HTTPS base URLs to prevent plaintext API-key exposure.
+
+    HTTP is allowed only for the loopback hosts listed in
+    :data:`_LOCALHOST_HOSTS` so local development stays unaffected.
+    """
+    stripped = base_url.strip()
+    if not stripped:
+        raise InvalidRequestError(
+            "base_url must be a non-empty string",
+            param="base_url",
+        )
+    if "://" not in stripped:
+        raise InvalidRequestError(
+            f"base_url must start with https:// (or http:// for localhost), "
+            f"got {base_url!r}",
+            param="base_url",
+        )
+    scheme, _, rest = stripped.partition("://")
+    scheme = scheme.lower()
+    host = rest.split("/", 1)[0].split(":", 1)[0].lower()
+    if scheme == "https":
+        return
+    if scheme == "http" and host in _LOCALHOST_HOSTS:
+        return
+    if scheme == "http":
+        raise InvalidRequestError(
+            f"base_url must use https:// for non-localhost endpoints, got "
+            f"{base_url!r} — sending API requests over HTTP would expose "
+            f"your API key in plaintext.",
+            param="base_url",
+        )
+    raise InvalidRequestError(
+        f"base_url scheme must be https:// (or http:// for localhost), "
+        f"got {scheme!r}://",
+        param="base_url",
+    )
 
 
 class DataxidClient:
@@ -50,6 +141,28 @@ class DataxidClient:
         base_url: str | None = None,
         timeout: float | httpx.Timeout = _DEFAULT_TIMEOUT,
     ):
+        if api_key is not None and not isinstance(api_key, str):
+            raise InvalidRequestError(
+                f"api_key must be a string or None, got {type(api_key).__name__}",
+                param="api_key",
+            )
+        if base_url is not None:
+            if not isinstance(base_url, str):
+                raise InvalidRequestError(
+                    f"base_url must be a string or None, got "
+                    f"{type(base_url).__name__}",
+                    param="base_url",
+                )
+            _validate_base_url(base_url)
+        if not isinstance(timeout, (int, float, httpx.Timeout)) or isinstance(
+            timeout, bool
+        ):
+            raise InvalidRequestError(
+                f"timeout must be a number or httpx.Timeout, got "
+                f"{type(timeout).__name__}",
+                param="timeout",
+            )
+
         self._api_key = api_key
         self._base_url = base_url
         self._timeout = timeout
@@ -66,7 +179,9 @@ class DataxidClient:
 
     @property
     def base_url(self) -> str:
-        return self._base_url or dataxid.base_url
+        url = self._base_url or dataxid.base_url
+        _validate_base_url(url)
+        return url
 
     def post(
         self, path: str, json: dict[str, Any] | None = None, idempotent: bool = True,
@@ -87,7 +202,7 @@ class DataxidClient:
         params: dict[str, Any] | None = None,
         idempotent: bool = False,
     ) -> dict | None:
-        url = f"{self.base_url}{path}"
+        url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -142,14 +257,11 @@ class DataxidClient:
     def _sleep_before_retry(
         attempt: int, response: httpx.Response | None = None,
     ) -> None:
-        retry_after = None
-        if response is not None:
-            raw = response.headers.get("Retry-After")
-            if raw:
-                try:
-                    retry_after = float(raw)
-                except ValueError:
-                    retry_after = None
+        retry_after = (
+            _parse_retry_after(response.headers.get("Retry-After"))
+            if response is not None
+            else None
+        )
 
         if retry_after is not None and retry_after > 0:
             delay = retry_after
@@ -186,8 +298,9 @@ class DataxidClient:
         if exc_class == InvalidRequestError:
             kwargs["param"] = error.get("param")
         elif exc_class == RateLimitError:
-            retry_after = response.headers.get("Retry-After")
-            kwargs["retry_after"] = float(retry_after) if retry_after else None
+            kwargs["retry_after"] = _parse_retry_after(
+                response.headers.get("Retry-After"),
+            )
         elif exc_class == QuotaExceededError:
             kwargs["usage"] = error.get("usage")
             kwargs["upgrade_url"] = error.get("upgrade_url")

@@ -89,7 +89,7 @@ def _decode_categorical(
 
 def _decode_numeric_discrete(codes: np.ndarray, stats: dict) -> pd.Series:
     dtype = "Float64" if stats["min_decimal"] < 0 else "Int64"
-    values = _decode_categorical(codes, stats)
+    values = _decode_categorical(codes, stats, rare_strategy="mask")
 
     is_rare = values == RARE_TOKEN
     cnt_rare = is_rare.sum()

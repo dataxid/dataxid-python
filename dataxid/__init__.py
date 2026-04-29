@@ -19,12 +19,9 @@ Quick start::
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import pandas as pd
+import pandas as pd
 
 from dataxid._log import disable_logging, enable_logging
 from dataxid._log import logger as _logger
@@ -150,7 +147,47 @@ def synthesize(
 
     Returns:
         DataFrame with synthetic data (target columns only)
+
+    Raises:
+        InvalidRequestError: If any user input fails validation.
+            Inherits from :class:`ValueError`.
     """
+    if seed is not _UNSET and seed is not None and (
+        not isinstance(seed, int) or isinstance(seed, bool)
+    ):
+        raise InvalidRequestError(
+            f"seed must be an integer or None, got {seed!r}",
+            param="seed",
+        )
+    if diversity is not _UNSET and (
+        not isinstance(diversity, (int, float))
+        or isinstance(diversity, bool)
+        or diversity <= 0
+    ):
+        raise InvalidRequestError(
+            f"diversity must be > 0, got {diversity!r}",
+            param="diversity",
+        )
+    if rare_cutoff is not _UNSET and (
+        not isinstance(rare_cutoff, (int, float))
+        or isinstance(rare_cutoff, bool)
+        or not (0 < rare_cutoff <= 1.0)
+    ):
+        raise InvalidRequestError(
+            f"rare_cutoff must be in (0, 1], got {rare_cutoff!r}",
+            param="rare_cutoff",
+        )
+    if (
+        rare_strategy is not _UNSET
+        and rare_strategy is not None
+        and rare_strategy not in ("mask", "sample")
+    ):
+        raise InvalidRequestError(
+            f"rare_strategy must be 'mask', 'sample', or None, "
+            f"got {rare_strategy!r}",
+            param="rare_strategy",
+        )
+
     n_explicit: int | None = n_samples if n_samples is not _UNSET else None
     if n_explicit is None and synthetic is not None:
         n_explicit = synthetic.n
@@ -266,7 +303,19 @@ def synthesize_tables(
 
     Returns:
         Dict mapping table name to synthetic DataFrame.
+
+    Raises:
+        InvalidRequestError: If any user input fails validation.
+            Inherits from :class:`ValueError`.
     """
+    if seed is not None and (
+        not isinstance(seed, int) or isinstance(seed, bool)
+    ):
+        raise InvalidRequestError(
+            f"seed must be an integer or None, got {seed!r}",
+            param="seed",
+        )
+
     if seed is not None:
         if config is None:
             config = {"seed": seed}
@@ -287,6 +336,26 @@ def synthesize_tables(
         rare_strategy, tables, name="rare_strategy",
         validator=lambda v: v in ("mask", "sample"),
         hint="'mask' or 'sample'",
+    )
+    _validate_per_table_dict(
+        synthetic, tables, name="synthetic",
+        validator=lambda v: isinstance(v, Synthetic),
+        hint="a Synthetic instance",
+    )
+    _validate_per_table_dict(
+        distribution, tables, name="distribution",
+        validator=lambda v: isinstance(v, Distribution),
+        hint="a Distribution instance",
+    )
+    _validate_per_table_dict(
+        bias, tables, name="bias",
+        validator=lambda v: isinstance(v, Bias),
+        hint="a Bias instance",
+    )
+    _validate_per_table_dict(
+        conditions, tables, name="conditions",
+        validator=lambda v: isinstance(v, pd.DataFrame),
+        hint="a pandas DataFrame",
     )
 
     from dataxid._table import (

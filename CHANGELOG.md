@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-04-29
+
+A hardening release: every public input is validated at the boundary,
+every validation failure raises `InvalidRequestError`. Existing call
+sites upgrade unchanged unless they catch `TypeError` for config errors
+or override `DataxidClient.base_url`.
+
+### Changed
+
+- All validation failures raise `InvalidRequestError`, which inherits
+  from `DataxidError` and `ValueError`. `except ValueError` keeps
+  working; replace `except TypeError` with `except InvalidRequestError`
+  for config errors.
+- `DataxidClient.base_url` must use HTTPS, except for local-development
+  hosts.
+
+### Added
+
+- Invalid inputs to public methods now fail before any network call
+  or training step begins, with the offending parameter named on the
+  exception.
+- `ModelConfig.model_size` and `encoding_types` rejected at
+  construction time when given unknown values.
+- `Table` enforces additional invariants on foreign keys and rejects
+  malformed `tables` dicts in `synthesize_tables`.
+
+### Fixed
+
+- HTTP client joins `base_url` and paths consistently regardless of
+  trailing slashes; parses `Retry-After` in numeric and HTTP-date
+  formats.
+- `enable_logging()` no longer crashes with `AttributeError` on
+  non-string levels.
+- Numeric-discrete decoding reaches the `NULL_TOKEN` path; a default
+  rare-strategy interaction previously masked nulls.
+- Training loss recording preserves legitimate `0.0` values.
+
 ## [0.3.0] - 2026-04-21
 
 This release introduces typed dataclasses for structured generation

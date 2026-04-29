@@ -44,6 +44,7 @@ from dataxid.training._config import (
     RareStrategy,
     Synthetic,
     _resolve_config,
+    _validate_encoding_types,
 )
 from dataxid.training._frozen import train_frozen
 from dataxid.training._seed import _set_seed
@@ -61,17 +62,18 @@ def _normalize_distribution(distribution: Distribution | None) -> dict | None:
     """Normalize a :class:`Distribution` input into its plain-dict form.
 
     Accepts only :class:`Distribution` instances (or ``None``). Dict inputs
-    are rejected with :class:`TypeError`; use ``Distribution(column=..., ...)``
-    instead.
+    are rejected with :class:`InvalidRequestError`; use
+    ``Distribution(column=..., ...)`` instead.
     """
     if distribution is None:
         return None
     if isinstance(distribution, Distribution):
         return asdict(distribution)
-    raise TypeError(
+    raise InvalidRequestError(
         "distribution must be a Distribution instance or None, got "
         f"{type(distribution).__name__}. Use dataxid.Distribution(...) — "
-        "dict inputs are no longer supported as of v0.3.0."
+        "dict inputs are no longer supported as of v0.3.0.",
+        param="distribution",
     )
 
 
@@ -101,16 +103,17 @@ def _merge_n(n_samples: int | None, synthetic: Synthetic | None) -> int | None:
     - Both unset → ``None`` (caller / downstream decides).
     - Only one set → that value.
     - Both set and equal → that value.
-    - Both set but conflicting → :class:`ValueError`.
+    - Both set but conflicting → :class:`InvalidRequestError`.
     """
     preset_n = synthetic.n if synthetic is not None else None
     if n_samples is None:
         return preset_n
     if preset_n is None or preset_n == n_samples:
         return n_samples
-    raise ValueError(
+    raise InvalidRequestError(
         f"n_samples ({n_samples}) conflicts with synthetic.n ({preset_n}). "
-        "Pass only one."
+        "Pass only one.",
+        param="n_samples",
     )
 
 
@@ -118,17 +121,18 @@ def _normalize_bias(bias: Bias | None) -> dict | None:
     """Normalize a :class:`Bias` input into its plain-dict form.
 
     Accepts only :class:`Bias` instances (or ``None``). Dict inputs are
-    rejected with :class:`TypeError`; use ``Bias(target=..., sensitive=...)``
-    instead.
+    rejected with :class:`InvalidRequestError`; use
+    ``Bias(target=..., sensitive=...)`` instead.
     """
     if bias is None:
         return None
     if isinstance(bias, Bias):
         return asdict(bias)
-    raise TypeError(
+    raise InvalidRequestError(
         "bias must be a Bias instance or None, got "
         f"{type(bias).__name__}. Use dataxid.Bias(...) — "
-        "dict inputs are no longer supported as of v0.3.0."
+        "dict inputs are no longer supported as of v0.3.0.",
+        param="bias",
     )
 
 
@@ -179,7 +183,10 @@ def _resolve_pick(
     if callable(pick) and not isinstance(pick, str):
         return pick, False
     if pick not in _PICK_FN_MAP:
-        raise ValueError(f"Unknown pick '{pick}'. Choose from {list(_PICK_FN_MAP)}")
+        raise InvalidRequestError(
+            f"Unknown pick {pick!r}. Choose from {list(_PICK_FN_MAP)}",
+            param="pick",
+        )
     return _PICK_FN_MAP[pick], pick == "all"
 
 
@@ -272,6 +279,16 @@ class Model:
         self._best_encoder_state: bytes | None = None
         self._encoder_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
 
+    @property
+    def is_sequential(self) -> bool:
+        """Whether this model was trained on sequential (time-ordered) data."""
+        return self._encoder.is_sequential
+
+    @property
+    def has_context(self) -> bool:
+        """Whether this model uses a parent (context) table."""
+        return self._encoder.has_context
+
     @classmethod
     def create(
         cls,
@@ -301,7 +318,41 @@ class Model:
 
         Returns:
             Trained Model ready for generate()
+
+        Raises:
+            InvalidRequestError: If any user input fails validation.
+                Inherits from :class:`ValueError`.
         """
+        if not isinstance(data, pd.DataFrame):
+            raise InvalidRequestError(
+                f"data must be a pandas DataFrame, got {type(data).__name__}",
+                param="data",
+            )
+        if n_samples is not None and (
+            not isinstance(n_samples, int)
+            or isinstance(n_samples, bool)
+            or n_samples <= 0
+        ):
+            raise InvalidRequestError(
+                f"n_samples must be a positive integer or None, got {n_samples!r}",
+                param="n_samples",
+            )
+        if parent is not None and not isinstance(parent, pd.DataFrame):
+            raise InvalidRequestError(
+                f"parent must be a pandas DataFrame or None, got {type(parent).__name__}",
+                param="parent",
+            )
+        if foreign_key is not None and not isinstance(foreign_key, str):
+            raise InvalidRequestError(
+                f"foreign_key must be a string or None, got {type(foreign_key).__name__}",
+                param="foreign_key",
+            )
+        if parent_key is not None and not isinstance(parent_key, str):
+            raise InvalidRequestError(
+                f"parent_key must be a string or None, got {type(parent_key).__name__}",
+                param="parent_key",
+            )
+
         config = _resolve_config(config)
 
         if parent is not None and foreign_key is not None and parent_key is None:
@@ -310,6 +361,7 @@ class Model:
         _validate_context_params(
             data, parent, parent_encoding_types, foreign_key, parent_key,
         )
+        _validate_encoding_types(parent_encoding_types, "parent_encoding_types")
         http = DataxidClient(api_key=api_key, base_url=base_url)
 
         privacy = config.privacy
@@ -449,22 +501,45 @@ class Model:
             DataFrame with synthetic data
 
         Raises:
-            ValueError: If both ``n_samples`` and ``conditions`` are provided and
-                their sizes disagree, if ``synthetic.n`` conflicts with
-                ``n_samples``, if ``bias`` is used in sequential mode,
-                or if ``diversity``/``rare_cutoff``/``rare_strategy``
-                are out of range.
-            TypeError: If ``synthetic`` is provided but is not a
-                :class:`Synthetic` instance.
+            InvalidRequestError: For any user-input error, including: both
+                ``n_samples`` and ``conditions`` are provided with
+                disagreeing sizes; ``synthetic.n`` conflicts with
+                ``n_samples``; ``bias`` is used in sequential mode;
+                ``diversity`` / ``rare_cutoff`` / ``rare_strategy`` are
+                out of range; ``synthetic`` is not a :class:`Synthetic`
+                instance. Inherits from :class:`ValueError` for backward
+                compatibility.
 
         Note:
             For filling missing values, use :meth:`impute` — do not attempt
             to emulate imputation through ``generate`` + ``conditions``.
         """
+        if n_samples is not None and (
+            not isinstance(n_samples, int)
+            or isinstance(n_samples, bool)
+            or n_samples <= 0
+        ):
+            raise InvalidRequestError(
+                f"n_samples must be a positive integer or None, got {n_samples!r}",
+                param="n_samples",
+            )
+        if conditions is not None and not isinstance(conditions, pd.DataFrame):
+            raise InvalidRequestError(
+                f"conditions must be a pandas DataFrame or None, got "
+                f"{type(conditions).__name__}",
+                param="conditions",
+            )
+        if parent is not None and not isinstance(parent, pd.DataFrame):
+            raise InvalidRequestError(
+                f"parent must be a pandas DataFrame or None, got "
+                f"{type(parent).__name__}",
+                param="parent",
+            )
         if synthetic is not None and not isinstance(synthetic, Synthetic):
-            raise TypeError(
+            raise InvalidRequestError(
                 "synthetic must be a Synthetic instance or None, got "
-                f"{type(synthetic).__name__}. Use dataxid.Synthetic(...)."
+                f"{type(synthetic).__name__}. Use dataxid.Synthetic(...).",
+                param="synthetic",
             )
 
         n_effective = _merge_n(n_samples, synthetic)
@@ -474,6 +549,41 @@ class Model:
         rare_strategy_effective = _merge_field(
             rare_strategy, synthetic, "rare_strategy", None
         )
+
+        if (
+            not isinstance(diversity_effective, (int, float))
+            or isinstance(diversity_effective, bool)
+            or diversity_effective <= 0
+        ):
+            raise InvalidRequestError(
+                f"diversity must be > 0, got {diversity_effective!r}",
+                param="diversity",
+            )
+        if (
+            not isinstance(rare_cutoff_effective, (int, float))
+            or isinstance(rare_cutoff_effective, bool)
+            or not (0 < rare_cutoff_effective <= 1.0)
+        ):
+            raise InvalidRequestError(
+                f"rare_cutoff must be in (0, 1], got {rare_cutoff_effective!r}",
+                param="rare_cutoff",
+            )
+        if (
+            rare_strategy_effective is not None
+            and rare_strategy_effective not in _RARE_STRATEGY_VALUES
+        ):
+            raise InvalidRequestError(
+                f"rare_strategy must be one of {_RARE_STRATEGY_VALUES}, "
+                f"got {rare_strategy_effective!r}",
+                param="rare_strategy",
+            )
+        if seed_effective is not None and (
+            not isinstance(seed_effective, int) or isinstance(seed_effective, bool)
+        ):
+            raise InvalidRequestError(
+                f"seed must be an integer or None, got {seed_effective!r}",
+                param="seed",
+            )
 
         return self._generate_core(
             n_samples=n_effective,
@@ -505,25 +615,24 @@ class Model:
 
         The ``imputation`` argument is only set by :meth:`impute` — public
         callers should go through :meth:`generate` instead.
+
+        Invariant (enforced by every public caller):
+            * ``diversity > 0``
+            * ``0 < rare_cutoff <= 1``
+            * ``rare_strategy`` is one of ``_RARE_STRATEGY_VALUES`` or ``None``
+            * ``seed`` is an ``int`` or ``None``
         """
-        if diversity <= 0:
-            raise ValueError(f"diversity must be > 0, got {diversity}")
-        if not (0 < rare_cutoff <= 1.0):
-            raise ValueError(f"rare_cutoff must be in (0, 1], got {rare_cutoff}")
         if rare_strategy is None:
             rare_strategy = self._config.privacy.rare_strategy
-        if rare_strategy not in _RARE_STRATEGY_VALUES:
-            raise ValueError(
-                f"rare_strategy must be one of "
-                f"{_RARE_STRATEGY_VALUES}, "
-                f"got {rare_strategy!r}"
-            )
 
         ctx = parent if parent is not None else self._parent
 
         if self._encoder.is_sequential:
             if bias:
-                raise ValueError("bias is not supported in sequential mode")
+                raise InvalidRequestError(
+                    "bias is not supported in sequential mode",
+                    param="bias",
+                )
             return self._generate_sequential(
                 n_samples=n_samples, conditions=conditions, parent=ctx,
                 seed=seed, distribution=distribution, imputation=imputation,
@@ -533,10 +642,11 @@ class Model:
 
         # flat mode: conditions row count = output row count
         if conditions is not None and n_samples is not None and n_samples != len(conditions):
-            raise ValueError(
+            raise InvalidRequestError(
                 f"n_samples ({n_samples}) conflicts with conditions length "
                 f"({len(conditions)}). When conditions is provided, omit n_samples "
-                f"or set it to len(conditions)."
+                f"or set it to len(conditions).",
+                param="n_samples",
             )
 
         n = (
@@ -702,9 +812,10 @@ class Model:
         fixed_values = None
         if conditions is not None and column_stats and context_key:
             if context_key not in conditions.columns:
-                raise ValueError(
+                raise InvalidRequestError(
                     f"Sequential conditions must contain the foreign key column "
-                    f"'{context_key}'. Got columns: {list(conditions.columns)}"
+                    f"'{context_key}'. Got columns: {list(conditions.columns)}",
+                    param="conditions",
                 )
             pk_col = self._encoder._parent_key
             training_parent = self._parent
@@ -863,7 +974,32 @@ class Model:
             df_dirty = df.copy()
             df_dirty.loc[0:10, "age"] = None
             df_clean = model.impute(df_dirty)
+
+        Raises:
+            InvalidRequestError: If any user input fails validation.
+                Inherits from :class:`ValueError`.
         """
+        if not isinstance(X, pd.DataFrame):
+            raise InvalidRequestError(
+                f"X must be a pandas DataFrame, got {type(X).__name__}",
+                param="X",
+            )
+        if parent is not None and not isinstance(parent, pd.DataFrame):
+            raise InvalidRequestError(
+                f"parent must be a pandas DataFrame or None, got "
+                f"{type(parent).__name__}",
+                param="parent",
+            )
+        if (
+            not isinstance(trials, int)
+            or isinstance(trials, bool)
+            or trials <= 0
+        ):
+            raise InvalidRequestError(
+                f"trials must be a positive integer, got {trials!r}",
+                param="trials",
+            )
+
         X_df = X.copy().reset_index(drop=True)
 
         fk = self._encoder._foreign_key
@@ -878,9 +1014,10 @@ class Model:
 
         synthetic = kwargs.pop("synthetic", None)
         if synthetic is not None and not isinstance(synthetic, Synthetic):
-            raise TypeError(
+            raise InvalidRequestError(
                 "synthetic must be a Synthetic instance or None, got "
-                f"{type(synthetic).__name__}. Use dataxid.Synthetic(...)."
+                f"{type(synthetic).__name__}. Use dataxid.Synthetic(...).",
+                param="synthetic",
             )
         if synthetic is not None:
             if "n_samples" in kwargs:
@@ -891,6 +1028,43 @@ class Model:
                 if field_name not in kwargs:
                     kwargs[field_name] = getattr(synthetic, field_name)
                 # else: explicit kwarg wins over preset
+
+        if "diversity" in kwargs:
+            div = kwargs["diversity"]
+            if (
+                not isinstance(div, (int, float))
+                or isinstance(div, bool)
+                or div <= 0
+            ):
+                raise InvalidRequestError(
+                    f"diversity must be > 0, got {div!r}", param="diversity"
+                )
+        if "rare_cutoff" in kwargs:
+            rc = kwargs["rare_cutoff"]
+            if (
+                not isinstance(rc, (int, float))
+                or isinstance(rc, bool)
+                or not (0 < rc <= 1.0)
+            ):
+                raise InvalidRequestError(
+                    f"rare_cutoff must be in (0, 1], got {rc!r}",
+                    param="rare_cutoff",
+                )
+        if kwargs.get("rare_strategy") is not None and (
+            kwargs["rare_strategy"] not in _RARE_STRATEGY_VALUES
+        ):
+            raise InvalidRequestError(
+                f"rare_strategy must be one of {_RARE_STRATEGY_VALUES}, "
+                f"got {kwargs['rare_strategy']!r}",
+                param="rare_strategy",
+            )
+        if kwargs.get("seed") is not None and (
+            not isinstance(kwargs["seed"], int) or isinstance(kwargs["seed"], bool)
+        ):
+            raise InvalidRequestError(
+                f"seed must be an integer or None, got {kwargs['seed']!r}",
+                param="seed",
+            )
 
         def _single_draw() -> pd.DataFrame:
             return self._generate_core(

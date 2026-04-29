@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 
+from dataxid.exceptions import InvalidRequestError
+
 logger: logging.Logger = logging.getLogger("dataxid")
 logger.addHandler(logging.NullHandler())
 
@@ -38,13 +40,22 @@ def enable_logging(level: str = "info") -> None:
         level: One of "debug", "info", "warning", "error", "critical".
 
     Raises:
-        ValueError: If *level* is not a valid Python log level name.
+        InvalidRequestError: If *level* is not a valid Python log level
+            name. Inherits from :class:`ValueError` for backward
+            compatibility with ``except ValueError``.
     """
+    if not isinstance(level, str):
+        raise InvalidRequestError(
+            f"Invalid log level: {level!r}. "
+            f"Use one of: debug, info, warning, error, critical.",
+            param="level",
+        )
     numeric = getattr(logging, level.upper(), None)
     if not isinstance(numeric, int):
-        raise ValueError(
+        raise InvalidRequestError(
             f"Invalid log level: {level!r}. "
-            f"Use one of: debug, info, warning, error, critical."
+            f"Use one of: debug, info, warning, error, critical.",
+            param="level",
         )
 
     logger.setLevel(numeric)

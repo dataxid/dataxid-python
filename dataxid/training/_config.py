@@ -10,10 +10,48 @@ Plain dicts are accepted for backwards-compatible ergonomics; see
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
+from dataxid.encoder._ports import EncodingType
+from dataxid.exceptions import InvalidRequestError
+
 RareStrategy = Literal["mask", "sample"]
+_RARE_STRATEGIES: tuple[str, ...] = ("mask", "sample")
+_MODEL_SIZES: tuple[str, ...] = ("small", "medium", "large")
+_VALID_ENCODING_TYPES: frozenset[str] = frozenset(et.value for et in EncodingType)
+
+
+def _validate_encoding_types(value: object, param: str) -> None:
+    """Validate a ``dict[str, str | EncodingType]`` encoding-override mapping.
+
+    Accepts ``None``. Raises :class:`InvalidRequestError` (param=``param``)
+    if the value is not a dict, has non-string keys, or contains a value
+    outside the :class:`EncodingType` enum.
+    """
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise InvalidRequestError(
+            f"{param} must be a dict or None, got {type(value).__name__}",
+            param=param,
+        )
+    for key, val in value.items():
+        if not isinstance(key, str):
+            raise InvalidRequestError(
+                f"{param} keys must be strings, got {type(key).__name__} ({key!r})",
+                param=param,
+            )
+        if isinstance(val, EncodingType):
+            continue
+        if isinstance(val, str) and val in _VALID_ENCODING_TYPES:
+            continue
+        raise InvalidRequestError(
+            f"{param}[{key!r}] must be one of {sorted(_VALID_ENCODING_TYPES)} "
+            f"or an EncodingType enum member, got {val!r}",
+            param=param,
+        )
 
 
 @dataclass(frozen=True)
@@ -52,8 +90,10 @@ class Synthetic:
             ``None`` means "fall back to ``ModelConfig.privacy.rare_strategy``".
 
     Raises:
-        ValueError: If ``diversity <= 0``, ``rare_cutoff`` is outside
-            ``(0, 1]``, or ``n`` is not a positive integer.
+        InvalidRequestError: If ``diversity <= 0``, ``rare_cutoff`` is
+            outside ``(0, 1]``, or ``n`` is not a positive integer.
+            Inherits from :class:`ValueError` for Python-idiomatic
+            ``except ValueError`` handling.
     """
 
     n: int | None = None
@@ -63,17 +103,28 @@ class Synthetic:
     rare_strategy: RareStrategy | None = None
 
     def __post_init__(self) -> None:
-        if self.n is not None and (not isinstance(self.n, int) or self.n <= 0):
-            raise ValueError(
-                f"Synthetic.n must be a positive integer or None, got {self.n!r}"
+        if self.n is not None and (
+            not isinstance(self.n, int) or isinstance(self.n, bool) or self.n <= 0
+        ):
+            raise InvalidRequestError(
+                f"Synthetic.n must be a positive integer or None, got {self.n!r}",
+                param="n",
             )
         if self.diversity <= 0:
-            raise ValueError(
-                f"Synthetic.diversity must be > 0, got {self.diversity!r}"
+            raise InvalidRequestError(
+                f"Synthetic.diversity must be > 0, got {self.diversity!r}",
+                param="diversity",
             )
         if not (0 < self.rare_cutoff <= 1):
-            raise ValueError(
-                f"Synthetic.rare_cutoff must be in (0, 1], got {self.rare_cutoff!r}"
+            raise InvalidRequestError(
+                f"Synthetic.rare_cutoff must be in (0, 1], got {self.rare_cutoff!r}",
+                param="rare_cutoff",
+            )
+        if self.rare_strategy is not None and self.rare_strategy not in _RARE_STRATEGIES:
+            raise InvalidRequestError(
+                f"Synthetic.rare_strategy must be 'mask', 'sample', or None, "
+                f"got {self.rare_strategy!r}",
+                param="rare_strategy",
             )
 
 
@@ -102,27 +153,34 @@ class Bias:
             of categorical column names, and must not include ``target``.
 
     Raises:
-        ValueError: If ``target`` is empty / not a string, ``sensitive``
-            is empty, contains non-strings, or includes ``target``.
+        InvalidRequestError: If ``target`` is empty / not a string,
+            ``sensitive`` is empty, contains non-strings, or includes
+            ``target``. Inherits from :class:`ValueError`.
     """
 
     target: str
     sensitive: list[str]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target, str) or not self.target:
-            raise ValueError(
-                f"Bias.target must be a non-empty string, got {self.target!r}"
+        if not isinstance(self.target, str) or not self.target.strip():
+            raise InvalidRequestError(
+                f"Bias.target must be a non-empty string, got {self.target!r}",
+                param="target",
             )
         if not self.sensitive:
-            raise ValueError("Bias.sensitive must be a non-empty list")
-        if any(not isinstance(s, str) or not s for s in self.sensitive):
-            raise ValueError(
-                "Bias.sensitive entries must be non-empty strings"
+            raise InvalidRequestError(
+                "Bias.sensitive must be a non-empty list",
+                param="sensitive",
+            )
+        if any(not isinstance(s, str) or not s.strip() for s in self.sensitive):
+            raise InvalidRequestError(
+                "Bias.sensitive entries must be non-empty strings",
+                param="sensitive",
             )
         if self.target in self.sensitive:
-            raise ValueError(
-                f"Bias.target ({self.target!r}) cannot appear in sensitive"
+            raise InvalidRequestError(
+                f"Bias.target ({self.target!r}) cannot appear in sensitive",
+                param="target",
             )
 
 
@@ -151,24 +209,59 @@ class Distribution:
             they need not sum to exactly 1.0.
 
     Raises:
-        ValueError: If ``column`` is empty / not a string, ``probabilities``
-            is empty, or any probability is negative.
+        InvalidRequestError: If ``column`` is empty / not a string,
+            ``probabilities`` is empty, contains non-string keys, or has
+            negative / non-finite values. Inherits from
+            :class:`ValueError`.
     """
 
     column: str
     probabilities: dict[str, float]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.column, str) or not self.column:
-            raise ValueError(
-                f"Distribution.column must be a non-empty string, got {self.column!r}"
+        if not isinstance(self.column, str) or not self.column.strip():
+            raise InvalidRequestError(
+                f"Distribution.column must be a non-empty string, got {self.column!r}",
+                param="column",
             )
         if not self.probabilities:
-            raise ValueError("Distribution.probabilities must be non-empty")
-        if any(p < 0 for p in self.probabilities.values()):
-            raise ValueError(
-                "Distribution.probabilities must be non-negative"
+            raise InvalidRequestError(
+                "Distribution.probabilities must be non-empty",
+                param="probabilities",
             )
+        for key, value in self.probabilities.items():
+            if not isinstance(key, str):
+                raise InvalidRequestError(
+                    f"Distribution.probabilities keys must be strings, got "
+                    f"{type(key).__name__} ({key!r}). Numeric category values "
+                    f"must be passed as their string representation, e.g. "
+                    f"{{'25': 0.5}} not {{25: 0.5}}.",
+                    param="probabilities",
+                )
+            if not key.strip():
+                raise InvalidRequestError(
+                    "Distribution.probabilities keys must be non-empty / "
+                    f"non-whitespace strings, got {key!r}",
+                    param="probabilities",
+                )
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise InvalidRequestError(
+                    f"Distribution.probabilities[{key!r}] must be a real number, "
+                    f"got {value!r}",
+                    param="probabilities",
+                )
+            if math.isnan(value) or math.isinf(value):
+                raise InvalidRequestError(
+                    f"Distribution.probabilities[{key!r}] must be finite, "
+                    f"got {value!r}",
+                    param="probabilities",
+                )
+            if value < 0:
+                raise InvalidRequestError(
+                    f"Distribution.probabilities[{key!r}] must be non-negative, "
+                    f"got {value!r}",
+                    param="probabilities",
+                )
 
 
 @dataclass
@@ -218,6 +311,24 @@ class Privacy:
     enabled: bool = False
     noise: float = 0.1
 
+    def __post_init__(self) -> None:
+        if self.rare_strategy not in _RARE_STRATEGIES:
+            raise InvalidRequestError(
+                f"Privacy.rare_strategy must be 'mask' or 'sample', "
+                f"got {self.rare_strategy!r}",
+                param="rare_strategy",
+            )
+        if not isinstance(self.noise, (int, float)) or isinstance(self.noise, bool):
+            raise InvalidRequestError(
+                f"Privacy.noise must be a real number, got {self.noise!r}",
+                param="noise",
+            )
+        if math.isnan(self.noise) or math.isinf(self.noise) or self.noise < 0:
+            raise InvalidRequestError(
+                f"Privacy.noise must be a non-negative finite number, got {self.noise!r}",
+                param="noise",
+            )
+
 
 @dataclass
 class ModelConfig:
@@ -255,6 +366,97 @@ class ModelConfig:
     seed: int | None = None
     timeout: float = 14400.0
 
+    def __post_init__(self) -> None:
+        if self.model_size not in _MODEL_SIZES:
+            raise InvalidRequestError(
+                f"ModelConfig.model_size must be one of {_MODEL_SIZES}, "
+                f"got {self.model_size!r}",
+                param="model_size",
+            )
+        self._check_positive_int("embedding_dim", self.embedding_dim)
+        self._check_positive_int("batch_size", self.batch_size)
+        self._check_positive_int("max_epochs", self.max_epochs)
+        self._check_positive_int("accumulation_steps", self.accumulation_steps)
+        self._check_non_negative_int("early_stop_patience", self.early_stop_patience)
+        self._check_unit_interval_open("val_split", self.val_split)
+        self._check_unit_interval_closed_left("label_smoothing", self.label_smoothing)
+        self._check_unit_interval_closed_left("embedding_dropout", self.embedding_dropout)
+        self._check_non_negative_finite("time_limit_seconds", self.time_limit_seconds)
+        self._check_positive_finite("timeout", self.timeout)
+        if self.learning_rate is not None:
+            self._check_positive_finite("learning_rate", self.learning_rate)
+        _validate_encoding_types(self.encoding_types, "encoding_types")
+
+    @staticmethod
+    def _check_positive_int(name: str, value: object) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise InvalidRequestError(
+                f"ModelConfig.{name} must be a positive integer, got {value!r}",
+                param=name,
+            )
+
+    @staticmethod
+    def _check_non_negative_int(name: str, value: object) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise InvalidRequestError(
+                f"ModelConfig.{name} must be a non-negative integer, got {value!r}",
+                param=name,
+            )
+
+    @staticmethod
+    def _check_unit_interval_open(name: str, value: object) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or math.isnan(value)
+            or not (0 < value < 1)
+        ):
+            raise InvalidRequestError(
+                f"ModelConfig.{name} must be in (0, 1), got {value!r}",
+                param=name,
+            )
+
+    @staticmethod
+    def _check_unit_interval_closed_left(name: str, value: object) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or math.isnan(value)
+            or not (0 <= value < 1)
+        ):
+            raise InvalidRequestError(
+                f"ModelConfig.{name} must be in [0, 1), got {value!r}",
+                param=name,
+            )
+
+    @staticmethod
+    def _check_non_negative_finite(name: str, value: object) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or math.isnan(value)
+            or math.isinf(value)
+            or value < 0
+        ):
+            raise InvalidRequestError(
+                f"ModelConfig.{name} must be a non-negative finite number, got {value!r}",
+                param=name,
+            )
+
+    @staticmethod
+    def _check_positive_finite(name: str, value: object) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or math.isnan(value)
+            or math.isinf(value)
+            or value <= 0
+        ):
+            raise InvalidRequestError(
+                f"ModelConfig.{name} must be a positive finite number, got {value!r}",
+                param=name,
+            )
+
     def to_dict(self) -> dict:
         """Serialize to a plain dict."""
         data = dict(self.__dict__)
@@ -276,14 +478,34 @@ def _resolve_config(config: dict | ModelConfig | None) -> ModelConfig:
         return config
     if isinstance(config, dict):
         data = dict(config)
-        privacy = data.get("privacy")
-        if isinstance(privacy, dict):
-            data["privacy"] = Privacy(**privacy)
-        elif privacy is None and "privacy" in data:
-            data["privacy"] = Privacy()
-        return ModelConfig(**data)
-    raise TypeError(
-        f"config must be a ModelConfig instance or dict, got {type(config).__name__}"
+        if "privacy" in data:
+            privacy = data["privacy"]
+            if privacy is None:
+                data["privacy"] = Privacy()
+            elif isinstance(privacy, dict):
+                try:
+                    data["privacy"] = Privacy(**privacy)
+                except TypeError as exc:
+                    raise InvalidRequestError(
+                        f"config['privacy'] contains an unknown field: {exc}",
+                        param="config",
+                    ) from exc
+            elif not isinstance(privacy, Privacy):
+                raise InvalidRequestError(
+                    f"config['privacy'] must be a Privacy instance, dict, or None, "
+                    f"got {type(privacy).__name__}",
+                    param="config",
+                )
+        try:
+            return ModelConfig(**data)
+        except TypeError as exc:
+            raise InvalidRequestError(
+                f"config contains an unknown field: {exc}",
+                param="config",
+            ) from exc
+    raise InvalidRequestError(
+        f"config must be a ModelConfig instance or dict, got {type(config).__name__}",
+        param="config",
     )
 
 
