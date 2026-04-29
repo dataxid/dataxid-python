@@ -14,10 +14,44 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
+from dataxid.encoder._ports import EncodingType
 from dataxid.exceptions import InvalidRequestError
 
 RareStrategy = Literal["mask", "sample"]
 _RARE_STRATEGIES: tuple[str, ...] = ("mask", "sample")
+_MODEL_SIZES: tuple[str, ...] = ("small", "medium", "large")
+_VALID_ENCODING_TYPES: frozenset[str] = frozenset(et.value for et in EncodingType)
+
+
+def _validate_encoding_types(value: object, param: str) -> None:
+    """Validate a ``dict[str, str | EncodingType]`` encoding-override mapping.
+
+    Accepts ``None``. Raises :class:`InvalidRequestError` (param=``param``)
+    if the value is not a dict, has non-string keys, or contains a value
+    outside the :class:`EncodingType` enum.
+    """
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise InvalidRequestError(
+            f"{param} must be a dict or None, got {type(value).__name__}",
+            param=param,
+        )
+    for key, val in value.items():
+        if not isinstance(key, str):
+            raise InvalidRequestError(
+                f"{param} keys must be strings, got {type(key).__name__} ({key!r})",
+                param=param,
+            )
+        if isinstance(val, EncodingType):
+            continue
+        if isinstance(val, str) and val in _VALID_ENCODING_TYPES:
+            continue
+        raise InvalidRequestError(
+            f"{param}[{key!r}] must be one of {sorted(_VALID_ENCODING_TYPES)} "
+            f"or an EncodingType enum member, got {val!r}",
+            param=param,
+        )
 
 
 @dataclass(frozen=True)
@@ -333,6 +367,12 @@ class ModelConfig:
     timeout: float = 14400.0
 
     def __post_init__(self) -> None:
+        if self.model_size not in _MODEL_SIZES:
+            raise InvalidRequestError(
+                f"ModelConfig.model_size must be one of {_MODEL_SIZES}, "
+                f"got {self.model_size!r}",
+                param="model_size",
+            )
         self._check_positive_int("embedding_dim", self.embedding_dim)
         self._check_positive_int("batch_size", self.batch_size)
         self._check_positive_int("max_epochs", self.max_epochs)
@@ -345,6 +385,7 @@ class ModelConfig:
         self._check_positive_finite("timeout", self.timeout)
         if self.learning_rate is not None:
             self._check_positive_finite("learning_rate", self.learning_rate)
+        _validate_encoding_types(self.encoding_types, "encoding_types")
 
     @staticmethod
     def _check_positive_int(name: str, value: object) -> None:

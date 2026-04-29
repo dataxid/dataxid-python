@@ -44,6 +44,7 @@ from dataxid.training._config import (
     RareStrategy,
     Synthetic,
     _resolve_config,
+    _validate_encoding_types,
 )
 from dataxid.training._frozen import train_frozen
 from dataxid.training._seed import _set_seed
@@ -341,12 +342,6 @@ class Model:
                 f"parent must be a pandas DataFrame or None, got {type(parent).__name__}",
                 param="parent",
             )
-        if parent_encoding_types is not None and not isinstance(parent_encoding_types, dict):
-            raise InvalidRequestError(
-                f"parent_encoding_types must be a dict or None, got "
-                f"{type(parent_encoding_types).__name__}",
-                param="parent_encoding_types",
-            )
         if foreign_key is not None and not isinstance(foreign_key, str):
             raise InvalidRequestError(
                 f"foreign_key must be a string or None, got {type(foreign_key).__name__}",
@@ -366,6 +361,7 @@ class Model:
         _validate_context_params(
             data, parent, parent_encoding_types, foreign_key, parent_key,
         )
+        _validate_encoding_types(parent_encoding_types, "parent_encoding_types")
         http = DataxidClient(api_key=api_key, base_url=base_url)
 
         privacy = config.privacy

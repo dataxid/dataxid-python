@@ -271,6 +271,55 @@ class TestModelCreateBoundary:
             )
         assert exc_info.value.param == "parent_encoding_types"
 
+    def test_parent_encoding_types_unknown_value_rejected(
+        self,
+        sample_df: pd.DataFrame,
+        parent_df: pd.DataFrame,
+        no_side_effects: tuple,
+    ) -> None:
+        """Bad value should fail at the boundary, not deep inside ``analyze()``."""
+        with pytest.raises(InvalidRequestError, match="must be one of") as exc_info:
+            Model.create(
+                data=sample_df,
+                parent=parent_df,
+                parent_encoding_types={"region": "FANCY_TYPE"},
+            )
+        assert exc_info.value.param == "parent_encoding_types"
+
+    def test_parent_encoding_types_non_string_key_rejected(
+        self,
+        sample_df: pd.DataFrame,
+        parent_df: pd.DataFrame,
+        no_side_effects: tuple,
+    ) -> None:
+        with pytest.raises(
+            InvalidRequestError, match="keys must be strings"
+        ) as exc_info:
+            Model.create(
+                data=sample_df,
+                parent=parent_df,
+                parent_encoding_types={1: "AUTO"},  # type: ignore[dict-item]
+            )
+        assert exc_info.value.param == "parent_encoding_types"
+
+    def test_parent_encoding_types_context_error_takes_priority(
+        self,
+        sample_df: pd.DataFrame,
+        no_side_effects: tuple,
+    ) -> None:
+        """When ``parent`` is missing, the context error wins over content errors.
+
+        Even with an invalid value, the user's real problem is the missing
+        ``parent`` argument; surfacing the content failure first would send
+        them down a debug detour.
+        """
+        with pytest.raises(InvalidRequestError, match="without parent") as exc_info:
+            Model.create(
+                data=sample_df,
+                parent_encoding_types={"col": "FANCY_TYPE"},
+            )
+        assert exc_info.value.param == "parent_encoding_types"
+
     def test_foreign_key_non_string_rejected(
         self, sample_df: pd.DataFrame, no_side_effects: tuple
     ) -> None:

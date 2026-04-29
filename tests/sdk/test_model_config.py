@@ -226,6 +226,10 @@ class TestModelConfigValidation:
                 {"learning_rate": float("nan")},
                 "learning_rate must be a positive finite",
             ),
+            ({"model_size": "xl"}, "model_size must be one of"),
+            ({"model_size": "MEDIUM"}, "model_size must be one of"),
+            ({"model_size": ""}, "model_size must be one of"),
+            ({"model_size": None}, "model_size must be one of"),
         ],
     )
     def test_invalid_input_rejected(
@@ -237,6 +241,73 @@ class TestModelConfigValidation:
     def test_learning_rate_none_accepted(self) -> None:
         """``None`` is the documented sentinel for 'auto-pick'; never rejected."""
         assert ModelConfig(learning_rate=None).learning_rate is None
+
+    @pytest.mark.parametrize("size", ["small", "medium", "large"])
+    def test_model_size_valid_values_accepted(self, size: str) -> None:
+        """Every documented model_size literal is accepted."""
+        assert ModelConfig(model_size=size).model_size == size
+
+    def test_invalid_model_size_param_attribute(self) -> None:
+        """The error names the offending field for programmatic handling."""
+        with pytest.raises(InvalidRequestError) as exc_info:
+            ModelConfig(model_size="xl")
+        assert exc_info.value.param == "model_size"
+
+
+class TestEncodingTypesValidation:
+    """ModelConfig.encoding_types is a typed mapping; the contract is enforced
+    at construction time so that the ``EncodingType(...)`` lookup deep inside
+    ``analyze()`` never sees an unknown value.
+    """
+
+    def test_none_is_accepted(self) -> None:
+        assert ModelConfig(encoding_types=None).encoding_types is None
+
+    def test_empty_dict_is_accepted(self) -> None:
+        assert ModelConfig(encoding_types={}).encoding_types == {}
+
+    @pytest.mark.parametrize("value", ["AUTO", "TABULAR_CATEGORICAL", "TABULAR_LAT_LONG"])
+    def test_valid_string_value_accepted(self, value: str) -> None:
+        cfg = ModelConfig(encoding_types={"col": value})
+        assert cfg.encoding_types == {"col": value}
+
+    def test_valid_enum_member_accepted(self) -> None:
+        from dataxid.encoder._ports import EncodingType
+        cfg = ModelConfig(encoding_types={"col": EncodingType.auto})
+        assert cfg.encoding_types == {"col": EncodingType.auto}
+
+    @pytest.mark.parametrize(
+        "value,error_match",
+        [
+            (["col"], "encoding_types must be a dict or None"),
+            ("AUTO", "encoding_types must be a dict or None"),
+            (42, "encoding_types must be a dict or None"),
+        ],
+    )
+    def test_non_dict_rejected(self, value: object, error_match: str) -> None:
+        with pytest.raises(InvalidRequestError, match=error_match):
+            ModelConfig(encoding_types=value)  # type: ignore[arg-type]
+
+    def test_non_string_key_rejected(self) -> None:
+        with pytest.raises(InvalidRequestError, match="keys must be strings"):
+            ModelConfig(encoding_types={1: "AUTO"})  # type: ignore[dict-item]
+
+    @pytest.mark.parametrize(
+        "value",
+        ["FANCY_TYPE", "categorical", "tabular_categorical", "auto", ""],
+    )
+    def test_unknown_string_value_rejected(self, value: str) -> None:
+        with pytest.raises(InvalidRequestError, match="must be one of"):
+            ModelConfig(encoding_types={"col": value})
+
+    def test_non_string_non_enum_value_rejected(self) -> None:
+        with pytest.raises(InvalidRequestError, match="must be one of"):
+            ModelConfig(encoding_types={"col": 42})  # type: ignore[dict-item]
+
+    def test_param_attribute_is_encoding_types(self) -> None:
+        with pytest.raises(InvalidRequestError) as exc_info:
+            ModelConfig(encoding_types={"col": "FANCY_TYPE"})
+        assert exc_info.value.param == "encoding_types"
 
 
 class TestResolveConfig:
