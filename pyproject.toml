@@ -1,6 +1,6 @@
 [project]
 name = "dataxid"
-version = "0.3.0"
+version = "0.3.1"
 description = "The Synthetic Data API — privacy-preserving synthetic data generation"
 authors = [{ name = "Dataxid", email = "dev@dataxid.com" }]
 requires-python = ">=3.10"
