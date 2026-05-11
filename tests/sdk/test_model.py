@@ -551,6 +551,21 @@ class TestSynthesize:
         assert len(delete_calls) == 1
 
 
+class TestSynthesizeInputValidation:
+    """``synthesize()`` must reject bad ``data`` up-front with a clear error
+    (#151). Previously passing ``None`` produced a deep ``AttributeError``
+    when something downstream accessed ``data.columns``."""
+
+    def test_data_none_raises_invalid_request_error(self) -> None:
+        with pytest.raises(InvalidRequestError, match="data cannot be None"):
+            dataxid.synthesize(data=None, n_samples=10)
+
+    def test_data_non_dataframe_raises_invalid_request_error(self) -> None:
+        for bad in ([{"a": 1}], "not a frame", 42, {"a": [1, 2]}):
+            with pytest.raises(InvalidRequestError, match="must be a pandas DataFrame"):
+                dataxid.synthesize(data=bad, n_samples=10)
+
+
 class TestStatusTransitions:
     """The full create → generate → delete lifecycle keeps status coherent."""
 
