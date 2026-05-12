@@ -152,6 +152,16 @@ def synthesize(
         InvalidRequestError: If any user input fails validation.
             Inherits from :class:`ValueError`.
     """
+    if data is None:
+        raise InvalidRequestError(
+            "data cannot be None. Please provide a pandas DataFrame.",
+            param="data",
+        )
+    if not isinstance(data, pd.DataFrame):
+        raise InvalidRequestError(
+            f"data must be a pandas DataFrame, got {type(data).__name__}.",
+            param="data",
+        )
     if seed is not _UNSET and seed is not None and (
         not isinstance(seed, int) or isinstance(seed, bool)
     ):
