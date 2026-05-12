@@ -328,6 +328,14 @@ class Model:
                 f"data must be a pandas DataFrame, got {type(data).__name__}",
                 param="data",
             )
+        dup_mask = data.columns.duplicated()
+        if dup_mask.any():
+            duplicates = sorted(set(data.columns[dup_mask].tolist()))
+            raise InvalidRequestError(
+                f"data contains duplicate column names: {duplicates}. "
+                "Please rename columns to be unique.",
+                param="data",
+            )
         if n_samples is not None and (
             not isinstance(n_samples, int)
             or isinstance(n_samples, bool)
