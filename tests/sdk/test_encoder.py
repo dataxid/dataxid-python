@@ -105,6 +105,21 @@ class TestAnalyze:
         assert first["column_stats"] == second["column_stats"]
         assert first["empirical_probs"] == second["empirical_probs"]
 
+    def test_non_zero_based_index_does_not_crash(
+        self, encoder: Encoder, sample_df: pd.DataFrame
+    ) -> None:
+        """Regression: a DataFrame with a non-zero-based index (df.tail(),
+        df.iloc[], or an explicit RangeIndex starting > 0) previously caused
+        a ZeroDivisionError deep in _reduce_numeric because root_keys used a
+        0-based index that did not align with the DataFrame's index.
+        """
+        shifted = sample_df.copy()
+        shifted.index = pd.RangeIndex(start=1000, stop=1000 + len(shifted))
+        meta = encoder.analyze(shifted)
+        baseline = encoder.analyze(sample_df.reset_index(drop=True))
+        assert meta["features"] == baseline["features"]
+        assert meta["cardinalities"] == baseline["cardinalities"]
+
 
 class TestPrepare:
     """``Encoder.prepare()`` — pre-encode data into tensors."""
