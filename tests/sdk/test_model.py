@@ -552,10 +552,6 @@ class TestSynthesize:
 
 
 class TestSynthesizeInputValidation:
-    """``synthesize()`` must reject bad ``data`` up-front with a clear error
-    (#151). Previously passing ``None`` produced a deep ``AttributeError``
-    when something downstream accessed ``data.columns``."""
-
     def test_data_none_raises_invalid_request_error(self) -> None:
         with pytest.raises(InvalidRequestError, match="data cannot be None"):
             dataxid.synthesize(data=None, n_samples=10)
