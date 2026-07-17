@@ -505,7 +505,13 @@ def compute_stats(
     """Analyze raw features and produce column_stats for encoding."""
     encoding_types = encoding_types or {}
     column_stats: dict[str, dict] = {}
-    root_keys = pd.Series(range(len(df)), name="__root_key__")
+    # root_keys must share its index with ``df`` so the pd.concat alignment in
+    # the per-type _analyze_* helpers preserves every row. Using
+    # ``pd.Series(range(len(df)))`` previously yielded a default 0..N-1 index
+    # which silently produced an all-NaN merge whenever ``df`` had a
+    # non-zero-based index (e.g. df.tail(), df.iloc[]), surfacing later as
+    # ZeroDivisionError deep in _reduce_numeric.
+    root_keys = pd.Series(range(len(df)), index=df.index, name="__root_key__")
 
     for feature in features:
         if feature not in df.columns:
