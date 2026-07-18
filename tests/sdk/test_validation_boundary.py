@@ -53,11 +53,7 @@ def parent_df() -> pd.DataFrame:
 
 @pytest.fixture
 def no_side_effects() -> Iterator[tuple]:
-    """Patch HTTP transport and training loop; assert neither was invoked.
-
-    Boundary validation must reject bad inputs before any of these run, so
-    a positive ``call_count`` is itself a regression.
-    """
+    """Patch HTTP transport and training loop; assert neither was invoked."""
     with patch.object(DataxidClient, "_request") as mock_req, \
          patch("dataxid.training._model.train_frozen") as mock_train:
         yield mock_req, mock_train
