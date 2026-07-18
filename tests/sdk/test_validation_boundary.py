@@ -231,6 +231,18 @@ class TestModelCreateBoundary:
             Model.create(data=None)  # type: ignore[arg-type]
         assert exc_info.value.param == "data"
 
+    def test_data_duplicate_columns_rejected(
+        self, no_side_effects: tuple
+    ) -> None:
+        df = pd.DataFrame(
+            [[1, 2, 3], [4, 5, 6]], columns=["a", "b", "a"]
+        )
+        with pytest.raises(
+            InvalidRequestError, match="duplicate column names"
+        ) as exc_info:
+            Model.create(data=df)
+        assert exc_info.value.param == "data"
+
     def test_n_samples_zero_rejected(
         self, sample_df: pd.DataFrame, no_side_effects: tuple
     ) -> None:
