@@ -96,6 +96,15 @@ def synthesize(
     rare_cutoff: float | _UnsetType = _UNSET,
     rare_strategy: RareStrategy | None | _UnsetType = _UNSET,
 ) -> pd.DataFrame:
+    # Fix #167: preserve all-NaN numeric columns by detecting them and
+    # filling with a sentinel value (0.0) so the model doesn't convert them to string.
+    # After generation, we restore them to NaN.
+    _all_nan_cols = {}
+    for col in data.columns:
+        if pd.api.types.is_numeric_dtype(data[col]) and data[col].isna().all():
+            _all_nan_cols[col] = data[col].dtype
+            data[col] = data[col].fillna(0.0).infer_objects(copy=False)  # Avoid: will be restored later
+
     """
     Generate synthetic data in one call.
 
